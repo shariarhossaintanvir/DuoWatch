@@ -80,8 +80,8 @@ export const JoinRoomPage: React.FC = () => {
 
       if (!result.success || !result.room) {
         let msg = 'Failed to join room.';
-        if (result.error === 'ROOM_FULL') {
-          msg = 'This private room is full (capacity strictly limited to 2 participants).';
+        if (result.error === 'ROOM_FULL' || result.error === 'PLATFORM_OCCUPIED') {
+          msg = 'This private room has reached maximum capacity (strictly 2 participants globally).';
         } else if (result.error === 'INVALID_GUEST_PASSCODE') {
           msg = 'Invalid invitation passcode for this room.';
         } else if (result.error === 'ROOM_NOT_FOUND_OR_EXPIRED') {

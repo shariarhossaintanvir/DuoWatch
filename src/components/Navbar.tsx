@@ -56,7 +56,11 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleChat, isChatOpen }) => {
   }, [isMobileMenuOpen]);
 
   const handleLeave = () => {
-    if (window.confirm('Are you sure you want to leave this private cinema session?')) {
+    const isOwner = session?.role === 'owner';
+    const confirmMsg = isOwner
+      ? 'Ending this watch party will terminate the private room and release the platform for new viewers. Are you sure you want to end this session?'
+      : 'Are you sure you want to leave this private cinema session?';
+    if (window.confirm(confirmMsg)) {
       leaveRoom();
       navigate('/');
     }

@@ -1,6 +1,6 @@
 import { getSupabaseClient, isSupabaseConfigured, getOrInitAnonymousSession, isLocalFallbackEnabled } from './supabase';
 import { generateRoomCode, generateSecureToken, sha256 } from './crypto';
-import type { MovieMode, ParticipantRole, MediaState, RoomSession } from '../types/cinema';
+import type { MovieMode, ParticipantRole, MediaState, RoomSession, PlatformAvailability } from '../types/cinema';
 
 export interface CreateRoomResult {
   success: boolean;
@@ -37,6 +37,7 @@ interface LocalRoomRecord {
 }
 
 const LOCAL_STORAGE_KEY_PREFIX = 'duowatch_local_room_';
+const LOCAL_ACTIVE_ROOM_KEY = 'duowatch_global_active_room_code';
 
 function getLocalRoom(roomCode: string): LocalRoomRecord | null {
   try {
@@ -62,9 +63,132 @@ function saveLocalRoom(room: LocalRoomRecord): void {
   }
 }
 
+function cleanExpiredLocalRooms(): void {
+  try {
+    const activeCode = localStorage.getItem(LOCAL_ACTIVE_ROOM_KEY);
+    if (!activeCode) return;
+    const room = getLocalRoom(activeCode);
+    if (!room) {
+      localStorage.removeItem(LOCAL_ACTIVE_ROOM_KEY);
+      return;
+    }
+    const now = Date.now();
+    // 1. Check wall clock expiry (24h)
+    if (now > room.expiresAt) {
+      localStorage.removeItem(`${LOCAL_STORAGE_KEY_PREFIX}${activeCode}`);
+      localStorage.removeItem(LOCAL_ACTIVE_ROOM_KEY);
+      return;
+    }
+    // 2. Check Host heartbeat (> 90s)
+    let hasActiveHost = false;
+    for (const p of room.participants.values()) {
+      if (p.role === 'owner') {
+        if (now - p.lastSeen <= 90000) {
+          hasActiveHost = true;
+        }
+      }
+    }
+    // If room is older than 30s and has no active host, consider it abandoned and reclaim
+    const isJustCreated = now - room.createdAt < 30000;
+    if (!hasActiveHost && !isJustCreated) {
+      localStorage.removeItem(`${LOCAL_STORAGE_KEY_PREFIX}${activeCode}`);
+      localStorage.removeItem(LOCAL_ACTIVE_ROOM_KEY);
+      return;
+    }
+    // 3. Purge stale partner
+    for (const [pId, p] of room.participants.entries()) {
+      if (p.role === 'partner' && now - p.lastSeen > 90000) {
+        room.participants.delete(pId);
+      }
+    }
+    saveLocalRoom(room);
+  } catch (e) {
+    console.error('Error cleaning local rooms:', e);
+  }
+}
+
 export class RoomService {
   /**
+   * Check global platform availability.
+   * Minimal sanitized public endpoint: reveals zero private session or media data.
+   */
+  public static async checkPlatformAvailability(): Promise<PlatformAvailability> {
+    const supabase = getSupabaseClient();
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        await getOrInitAnonymousSession();
+        const { data, error } = await supabase.rpc('duowatch_get_platform_availability');
+        if (error || !data || !data.success) {
+          // If RPC fails or table doesn't have Phase 21 function yet, fallback safely
+          return {
+            success: false,
+            isAvailable: true,
+            status: 'available',
+            activeParticipants: 0,
+            error: error?.message,
+          };
+        }
+        return {
+          success: true,
+          isAvailable: Boolean(data.isAvailable),
+          status: data.status || (data.isAvailable ? 'available' : 'occupied'),
+          activeParticipants: data.activeParticipants ?? 0,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          isAvailable: true,
+          status: 'available',
+          activeParticipants: 0,
+          error: err.message,
+        };
+      }
+    }
+
+    // Local / Offline fallback check
+    cleanExpiredLocalRooms();
+    const activeCode = localStorage.getItem(LOCAL_ACTIVE_ROOM_KEY);
+    if (!activeCode) {
+      return {
+        success: true,
+        isAvailable: true,
+        status: 'available',
+        activeParticipants: 0,
+      };
+    }
+
+    const room = getLocalRoom(activeCode);
+    if (!room) {
+      localStorage.removeItem(LOCAL_ACTIVE_ROOM_KEY);
+      return {
+        success: true,
+        isAvailable: true,
+        status: 'available',
+        activeParticipants: 0,
+      };
+    }
+
+    const count = room.participants.size;
+    if (count <= 1) {
+      return {
+        success: true,
+        isAvailable: false,
+        status: 'waiting_partner',
+        activeParticipants: count,
+      };
+    }
+
+    return {
+      success: true,
+      isAvailable: false,
+      status: 'occupied',
+      activeParticipants: 2,
+    };
+  }
+
+  /**
    * Create a new secure private cinema room with host session credentials.
+   * Strictly enforces GLOBAL_ACTIVE_ROOMS <= 1 invariant.
    */
   public static async createRoom(
     roomName: string,
@@ -112,7 +236,8 @@ export class RoomService {
         });
 
         if (error || !data || !data.success) {
-          return { success: false, error: error?.message || data?.error || 'Database room creation failed.' };
+          const errCode = error?.message || data?.error || 'Database room creation failed.';
+          return { success: false, error: errCode };
         }
 
         const roomSession: RoomSession = {
@@ -143,7 +268,13 @@ export class RoomService {
       };
     }
 
-    // Local / Offline fallback creation
+    // Local / Offline fallback creation with GLOBAL_ACTIVE_ROOMS <= 1 enforcement
+    cleanExpiredLocalRooms();
+    const existingActiveCode = localStorage.getItem(LOCAL_ACTIVE_ROOM_KEY);
+    if (existingActiveCode) {
+      return { success: false, error: 'PLATFORM_OCCUPIED' };
+    }
+
     const roomId = `room_${Date.now()}`;
     const localRecord: LocalRoomRecord = {
       id: roomId,
@@ -159,6 +290,7 @@ export class RoomService {
     };
 
     saveLocalRoom(localRecord);
+    localStorage.setItem(LOCAL_ACTIVE_ROOM_KEY, roomCode);
 
     const roomSession: RoomSession = {
       roomId,
@@ -179,7 +311,7 @@ export class RoomService {
 
   /**
    * Join an existing cinema room as Owner or Partner.
-   * Strictly enforces capacity: maximum 2 participants allowed.
+   * Strictly enforces capacity: maximum 2 participants allowed globally.
    * Registers a server-verifiable session token credential for all subsequent RPC actions.
    */
   public static async joinRoom(
@@ -262,6 +394,7 @@ export class RoomService {
     }
 
     // Local / Offline fallback join
+    cleanExpiredLocalRooms();
     const record = getLocalRoom(formattedCode);
     if (!record) {
       return { success: false, error: 'ROOM_NOT_FOUND_OR_EXPIRED' };
@@ -292,8 +425,16 @@ export class RoomService {
 
     // Strict 2-Participant Capacity Enforcement
     const existing = record.participants.get(participantId);
-    if (!existing && record.participants.size >= 2) {
-      return { success: false, error: 'ROOM_FULL' };
+    if (!existing) {
+      if (record.participants.size >= 2) {
+        return { success: false, error: 'ROOM_FULL' };
+      }
+      // Check role occupancy: at most 1 owner and 1 partner
+      for (const p of record.participants.values()) {
+        if (p.role === role) {
+          return { success: false, error: 'ROOM_FULL' };
+        }
+      }
     }
 
     // Register/update participant with session token hash
@@ -368,7 +509,8 @@ export class RoomService {
 
   /**
    * Remove participant from room upon voluntary exit.
-   * Authenticated: requires valid sessionToken matching participant record.
+   * Host leaving terminates room and frees the platform.
+   * Partner leaving frees the partner slot.
    */
   public static async leaveRoom(
     roomCode: string,
@@ -387,8 +529,10 @@ export class RoomService {
           p_participant_id: participantId,
           p_session_token_hash: sessionTokenHash,
         });
+        this.clearSession(formattedCode);
         return !error && Boolean(data?.success);
       } catch {
+        this.clearSession(formattedCode);
         return false;
       }
     } else if (!isLocalFallbackEnabled()) {
@@ -399,11 +543,68 @@ export class RoomService {
     if (record) {
       const p = record.participants.get(participantId);
       if (p && p.sessionTokenHash === sessionTokenHash) {
-        record.participants.delete(participantId);
-        saveLocalRoom(record);
+        if (p.role === 'owner') {
+          // Host departure terminates room
+          try {
+            localStorage.removeItem(`${LOCAL_STORAGE_KEY_PREFIX}${formattedCode}`);
+            localStorage.removeItem(LOCAL_ACTIVE_ROOM_KEY);
+          } catch { }
+        } else {
+          // Partner departure releases partner slot
+          record.participants.delete(participantId);
+          saveLocalRoom(record);
+        }
+        this.clearSession(formattedCode);
         return true;
       }
     }
+    this.clearSession(formattedCode);
+    return false;
+  }
+
+  /**
+   * Explicitly terminate room and release both global participant slots (Host only).
+   */
+  public static async endRoom(
+    roomCode: string,
+    participantId: string,
+    sessionToken: string
+  ): Promise<boolean> {
+    if (!sessionToken) return false;
+    const formattedCode = roomCode.trim().toUpperCase();
+    const sessionTokenHash = await sha256(sessionToken);
+
+    const supabase = getSupabaseClient();
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { data, error } = await supabase.rpc('duowatch_end_room', {
+          p_room_code: formattedCode,
+          p_participant_id: participantId,
+          p_session_token_hash: sessionTokenHash,
+        });
+        this.clearSession(formattedCode);
+        return !error && Boolean(data?.success);
+      } catch {
+        this.clearSession(formattedCode);
+        return false;
+      }
+    } else if (!isLocalFallbackEnabled()) {
+      return false;
+    }
+
+    const record = getLocalRoom(formattedCode);
+    if (record) {
+      const p = record.participants.get(participantId);
+      if (p && p.sessionTokenHash === sessionTokenHash && p.role === 'owner') {
+        try {
+          localStorage.removeItem(`${LOCAL_STORAGE_KEY_PREFIX}${formattedCode}`);
+          localStorage.removeItem(LOCAL_ACTIVE_ROOM_KEY);
+        } catch { }
+        this.clearSession(formattedCode);
+        return true;
+      }
+    }
+    this.clearSession(formattedCode);
     return false;
   }
 

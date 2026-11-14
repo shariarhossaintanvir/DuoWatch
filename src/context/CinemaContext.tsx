@@ -429,12 +429,12 @@ export const CinemaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   }, [myParticipantId, handleDataMessage, addSystemMessage, setSession, setMediaState]);
 
-  // Periodic Database Heartbeat (every 30 seconds to prevent 90s timeout purge)
+  // Periodic Database Heartbeat (every 15 seconds to maintain 90s server lease)
   useEffect(() => {
     if (!session || !session.sessionToken) return;
     const interval = window.setInterval(() => {
       RoomService.sendHeartbeat(session.roomCode, myParticipantId, session.sessionToken!);
-    }, 30000);
+    }, 15000);
 
     return () => {
       window.clearInterval(interval);
@@ -445,7 +445,11 @@ export const CinemaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const leaveRoom = useCallback(() => {
     if (sessionRef.current) {
       if (sessionRef.current.sessionToken) {
-        RoomService.leaveRoom(sessionRef.current.roomCode, myParticipantId, sessionRef.current.sessionToken);
+        if (sessionRef.current.role === 'owner') {
+          RoomService.endRoom(sessionRef.current.roomCode, myParticipantId, sessionRef.current.sessionToken);
+        } else {
+          RoomService.leaveRoom(sessionRef.current.roomCode, myParticipantId, sessionRef.current.sessionToken);
+        }
       }
       RoomService.clearSession(sessionRef.current.roomCode);
     }

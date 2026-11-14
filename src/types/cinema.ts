@@ -2,6 +2,16 @@ export type MovieMode = 'youtube' | 'local' | 'screen';
 
 export type ParticipantRole = 'owner' | 'partner';
 
+export type PlatformStatus = 'available' | 'waiting_partner' | 'occupied';
+
+export interface PlatformAvailability {
+  success: boolean;
+  isAvailable: boolean;
+  status: PlatformStatus;
+  activeParticipants: number;
+  error?: string;
+}
+
 export type MediaSyncAction =
   | 'video_change'
   | 'play'

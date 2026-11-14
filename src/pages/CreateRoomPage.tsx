@@ -1,13 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useCinema } from '../context/CinemaContext';
 import { RoomService } from '../lib/roomService';
-import type { MovieMode } from '../types/cinema';
-import { Film, Monitor, Shield, ArrowLeft, Loader2, Sparkles, AlertCircle } from 'lucide-react';
+import type { MovieMode, PlatformAvailability } from '../types/cinema';
+import { Film, Monitor, ArrowLeft, Loader2, Sparkles, AlertCircle } from 'lucide-react';
 import { YoutubeIcon } from '../components/common/YoutubeIcon';
 import { Navbar } from '../components/Navbar';
 import { Footer } from '../components/common/Footer';
 import { SEO } from '../components/common/SEO';
+import { OccupiedWaitingScreen } from '../components/room/OccupiedWaitingScreen';
 
 export const CreateRoomPage: React.FC = () => {
   const navigate = useNavigate();
@@ -18,6 +19,26 @@ export const CreateRoomPage: React.FC = () => {
   const [initialMode, setInitialMode] = useState<MovieMode>('youtube');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const [platformAvailability, setPlatformAvailability] = useState<PlatformAvailability | null>(null);
+  const [isCheckingAvailability, setIsCheckingAvailability] = useState<boolean>(true);
+
+  useEffect(() => {
+    let mounted = true;
+    RoomService.checkPlatformAvailability()
+      .then((res) => {
+        if (mounted) {
+          setPlatformAvailability(res);
+          setIsCheckingAvailability(false);
+        }
+      })
+      .catch(() => {
+        if (mounted) setIsCheckingAvailability(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,6 +59,16 @@ export const CreateRoomPage: React.FC = () => {
       );
 
       if (!result.success || !result.room) {
+        if (result.error === 'PLATFORM_OCCUPIED') {
+          setPlatformAvailability({
+            success: true,
+            isAvailable: false,
+            status: 'occupied',
+            activeParticipants: 2,
+          });
+          setIsLoading(false);
+          return;
+        }
         setErrorMessage(result.error || 'Failed to create room.');
         setIsLoading(false);
         return;
@@ -98,6 +129,52 @@ export const CreateRoomPage: React.FC = () => {
     },
   ];
 
+  if (isCheckingAvailability) {
+    return (
+      <div className="min-h-screen bg-[#0b0c10] text-gray-100 flex flex-col justify-between selection:bg-amber-500 selection:text-black">
+        <SEO 
+          title="Create Private Watch Room | DuoWatch" 
+          description="Launch a private watch room for two people."
+          path="/create"
+        />
+        <Navbar />
+        <main className="flex-1 flex flex-col items-center justify-center p-4">
+          <Loader2 className="w-7 h-7 text-amber-500 animate-spin mb-3" />
+          <p className="text-xs text-gray-400 font-mono">Checking platform availability...</p>
+        </main>
+        <Footer />
+      </div>
+    );
+  }
+
+  // If platform is occupied, render the waiting screen
+  if (platformAvailability && !platformAvailability.isAvailable && platformAvailability.status === 'occupied') {
+    return (
+      <div className="min-h-screen bg-[#0b0c10] text-gray-100 flex flex-col justify-between selection:bg-amber-500 selection:text-black">
+        <SEO 
+          title="Platform Occupied | DuoWatch" 
+          description="DuoWatch is currently occupied with a private watch party."
+          path="/create"
+        />
+        <Navbar />
+        <main className="flex-1 flex flex-col justify-center py-8 sm:py-12 px-4 w-full">
+          <OccupiedWaitingScreen
+            initialStatus={platformAvailability}
+            onAvailable={() => {
+              setPlatformAvailability({
+                success: true,
+                isAvailable: true,
+                status: 'available',
+                activeParticipants: 0,
+              });
+            }}
+          />
+        </main>
+        <Footer />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0b0c10] text-gray-100 flex flex-col justify-between selection:bg-amber-500 selection:text-black">
       <SEO 
@@ -126,7 +203,7 @@ export const CreateRoomPage: React.FC = () => {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white font-['Outfit']">Create Watch Room</h1>
-              <p className="text-xs text-gray-400">Owner session with host playback authority</p>
+              <p className="text-xs text-gray-400">Host session with playback authority</p>
             </div>
           </div>
 
@@ -148,57 +225,57 @@ export const CreateRoomPage: React.FC = () => {
                 value={roomName}
                 onChange={(e) => setRoomName(e.target.value)}
                 placeholder="e.g. Midnight Movie Club"
-                maxLength={40}
-                className="w-full bg-[#0b0c10] border border-[#282d3c] rounded-lg px-3.5 py-2.5 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-amber-500/60 transition-colors"
+                maxLength={64}
+                className="w-full bg-[#0b0c10] border border-[#282d3c] focus:border-amber-500 rounded-lg px-3.5 py-2.5 text-xs text-white placeholder-gray-500 outline-none transition-colors"
               />
             </div>
 
-            {/* Host Name Input */}
+            {/* Display Name Input */}
             <div>
               <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1.5">
                 Your Display Name (Host)
               </label>
               <input
                 type="text"
-                value={hostName}
-                onChange={(e) => {
-                  setHostName(e.target.value);
-                  if (errorMessage) setErrorMessage(null);
-                }}
-                placeholder="e.g. Alex"
-                maxLength={24}
                 required
-                className="w-full bg-[#0b0c10] border border-[#282d3c] rounded-lg px-3.5 py-2.5 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-amber-500/60 transition-colors"
+                value={hostName}
+                onChange={(e) => setHostName(e.target.value)}
+                placeholder="e.g. Alice"
+                maxLength={32}
+                className="w-full bg-[#0b0c10] border border-[#282d3c] focus:border-amber-500 rounded-lg px-3.5 py-2.5 text-xs text-white placeholder-gray-500 outline-none transition-colors"
               />
             </div>
 
-            {/* Initial Mode Choice */}
+            {/* Initial Cinema Mode Selection */}
             <div>
               <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1.5">
-                Initial Watch Mode
+                Starting Mode
               </label>
               <div className="grid grid-cols-1 gap-2">
                 {modeOptions.map((opt) => {
                   const Icon = opt.icon;
                   const isSelected = initialMode === opt.id;
                   return (
-                    <div
+                    <button
                       key={opt.id}
+                      type="button"
                       onClick={() => setInitialMode(opt.id)}
-                      className={`cursor-pointer p-3 rounded-lg border transition-colors flex items-start gap-3 ${
+                      className={`text-left p-3 rounded-lg border flex items-center gap-3 transition-colors ${
                         isSelected
-                          ? 'bg-amber-500/10 border-amber-500/60 text-white'
+                          ? 'bg-[#1c1f2a] border-amber-500/80 text-white'
                           : 'bg-[#0b0c10] border-[#282d3c] text-gray-400 hover:border-gray-600'
                       }`}
                     >
-                      <div className={`p-1.5 rounded-md shrink-0 ${isSelected ? 'bg-amber-500 text-black' : 'bg-[#1c1f2a] text-gray-300'}`}>
+                      <div className={`p-2 rounded-md ${
+                        isSelected ? 'bg-amber-500 text-black' : 'bg-[#14161d] text-gray-400'
+                      }`}>
                         <Icon className="w-4 h-4" />
                       </div>
-                      <div className="flex flex-col">
-                        <span className="text-xs font-semibold text-gray-100">{opt.title}</span>
-                        <span className="text-[11px] text-gray-400 leading-tight mt-0.5">{opt.desc}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-semibold text-white">{opt.title}</div>
+                        <div className="text-[11px] text-gray-400 truncate">{opt.desc}</div>
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -208,24 +285,18 @@ export const CreateRoomPage: React.FC = () => {
             <button
               type="submit"
               disabled={isLoading}
-              className="w-full bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-black font-semibold text-sm py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors mt-2"
+              className="w-full mt-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-black font-semibold text-xs py-3 rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
               {isLoading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Initializing Room Session...
+                  Creating Room...
                 </>
               ) : (
-                'Create Room'
+                'Create Watch Room & Get Invite Link'
               )}
             </button>
           </form>
-
-          {/* Security Guarantee */}
-          <div className="mt-5 pt-4 border-t border-[#282d3c] flex flex-wrap items-center justify-center gap-2 text-xs text-gray-500 text-center">
-            <Shield className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span>Strict Two-Person Limit | Ephemeral Session | No Account Required</span>
-          </div>
         </div>
       </main>
 
