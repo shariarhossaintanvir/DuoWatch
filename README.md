@@ -1,168 +1,252 @@
-# DuoWatch — Private Cinema for Two
+# DuoWatch
 
-> **High-fidelity, zero-cost private cinema theater for exactly two people.**  
-> Built with React 19, TypeScript, Tailwind CSS, WebRTC, and Supabase Free Tier.
+**Private watch-party experience for two participants.**
 
-[![Tests](https://img.shields.io/badge/tests-20%20passed-emerald)](https://github.com)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Hosting](https://img.shields.io/badge/hosting-Cloudflare%20Pages%20Free-orange)](https://pages.cloudflare.com)
-[![Signaling](https://img.shields.io/badge/signaling-Supabase%20Free-emerald)](https://supabase.com)
-[![Media](https://img.shields.io/badge/media-WebRTC%20P2P%20Encrypted-amber)](https://webrtc.org)
-[![Budget](https://img.shields.io/badge/cost-$0%20Zero%20Cost%20First-success)](https://github.com)
+DuoWatch is a lightweight, zero-cost virtual cinema built for exactly two people — an Owner (Host) and a Partner (Guest). It enables synchronized YouTube playback, peer-to-peer local video streaming, screen sharing, and real-time text chat in a private, browser-based room.
 
 ---
 
-## 1. Overview & Strictly $0 Budget
+## Overview
 
-DuoWatch is a zero-cost-first virtual cinema engineered exclusively for **two participants: an Owner (Host) and a Partner (Guest)**.
+Most watch-party tools require accounts, collect personal data, rely on paid subscriptions, or route private media through third-party media servers. DuoWatch was engineered to eliminate these trade-offs:
 
-- **Zero Cloud Storage**: Video files are decoded in-browser and transmitted direct peer-to-peer via encrypted WebRTC. No video is ever uploaded to any server.
-- **Zero Paid Subscriptions**: Runs 100% within free tiers of Cloudflare Pages and Supabase.
-- **Zero Registration**: Instant cryptographic invitation tokens without mandatory account creation or credit card requirements.
-- **Strict Capacity Enforcement**: Server-side PostgreSQL row locking and token authorization guarantee that no third party can ever join or eavesdrop.
+- **Strictly Two Participants:** Designed specifically for couples or friends watching together, eliminating unwanted guests and room clutter.
+- **Direct Peer-to-Peer Media:** Local video files and screen shares stream directly between browsers over WebRTC. No media files are ever uploaded to a server or cloud storage bucket.
+- **Zero Cost Infrastructure:** Built to operate entirely within the free tiers of Cloudflare Pages (frontend hosting) and Supabase (authentication, authorization, and signaling).
+- **No Account Registration:** Participants authenticate anonymously via Supabase Auth and join using cryptographic room credentials.
 
 ---
 
-## 2. Three Distinct Cinema Modes
+## Features
 
-### 🎬 Mode A: YouTube Together
-- Official embedded YouTube IFrame API integration.
+### Synchronized YouTube Playback
+- Integrated with the official YouTube IFrame Player API.
 - Host-authoritative playback controls (play, pause, seek, and video changes).
-- Sub-second clock offset calculation and automatic drift correction (re-aligns playback if drift exceeds 0.75 seconds).
-- Graceful handling of restricted/unembeddable videos with direct YouTube links.
+- Sub-second drift detection and clock alignment across participants.
+- Fallback handling with direct YouTube links for embed-restricted videos.
 
-### 📼 Mode B: Local File Streaming
-- Host selects any local video file (`.mp4`, `.webm`, `.mkv`) on their machine.
-- Decoded locally with `URL.createObjectURL` and captured via `HTMLMediaElement.captureStream()`.
-- Streamed directly to Partner over WebRTC DTLS-SRTP.
-- Decoded video frames and audio stream directly to the partner’s screen with zero server uploads.
+### Local Video File Sharing (Peer-to-Peer)
+- Host can select local video files (`.mp4`, `.webm`, `.mkv`) directly from their device.
+- Video streams directly from the Host's browser to the Partner's browser using `HTMLMediaElement.captureStream()` over WebRTC DTLS-SRTP.
+- No file uploads, no storage fees, and zero cloud bandwidth consumption.
 
-### 🖥️ Mode C: Screen & Tab Sharing
-- Share any browser tab, desktop window, or entire monitor via `navigator.mediaDevices.getDisplayMedia`.
-- Streams system and tab audio when supported by the browser.
-- Native capture termination handling and mobile browser detection.
+### Screen & Window Sharing
+- Share desktop displays, application windows, or browser tabs via `navigator.mediaDevices.getDisplayMedia`.
+- Captures and transmits system/tab audio where supported by the browser.
+- Automatic stream termination cleanup when the sharing session ends.
+
+### Ephemeral Text Chat & Reactions
+- Real-time text messaging between participants.
+- Floating cinema emoji reactions.
+- Messages exist exclusively in browser memory during the active session; zero chat logs or messages are stored in any database.
+
+### Host & Partner Session Management
+- Host holds cryptographic authority over room playback mode, media selection, and room termination.
+- Partner receives full playback synchronization and interactive chat participation.
+- Session tokens verify participant identity across page refreshes and reconnections.
+- 90-second heartbeat leases automatically release abandoned rooms and participant slots.
+
+### Invitation-Based Joining
+- Host generates a unique 6-character room code and guest passcode.
+- One-click invitation links prefill room details for seamless guest onboarding.
+
+### Responsive Desktop & Mobile Experience
+- Dark cinema UI built with Tailwind CSS.
+- Adaptive controls, mobile bottom sheets, and native full-screen support across viewport sizes.
+
+### Global Two-Participant Capacity Management
+- Architectural invariant: at most one active room (`GLOBAL_ACTIVE_ROOMS <= 1`) and at most two participants (`GLOBAL_ACTIVE_PARTICIPANTS <= 2`) globally.
+- Sanitized public availability endpoint allows visitors to verify platform availability prior to room creation.
+- *Status Note:* Implemented in application code and verified across automated test suites; live enforcement on the remote Supabase backend activates upon applying the Phase 21 database migration.
 
 ---
 
-## 3. Communication & Real-Time Presence
+## Technology Stack
 
-- **WebRTC Voice Chat**: Live voice communication with hardware echo cancellation, noise suppression, and auto gain control.
-- **Speaking Indicator**: Real-time Web Audio FFT analysis with animated glowing pulse rings around speaking participant avatars.
-- **Private Text Chat**: Low-latency ephemeral chat sent over WebRTC DataChannels with zero persistent database logging.
-- **Floating Emoji Reactions**: Live floating emoji reactions (`🍿`, `❤️`, `😂`, `👏`, `🔥`, `🎬`) animating across the cinema screen.
-- **Connection Diagnostics**: Live Round Trip Time (RTT), connection state, and audio input level meters.
-
----
-
-## 4. Security & Privacy Guarantees
-
-1. **Strict 2-Person Limit**: Enforced using PostgreSQL `FOR UPDATE` row locks and server-side RPC functions. Any third participant attempt is rejected with `ROOM_FULL`.
-2. **Cryptographic Host Authority**: Owner controls are authenticated with a 32-byte cryptographic token hash. Guests cannot tamper with room modes or playback.
-3. **End-to-End Encryption**: Voice and media streams are encrypted with DTLS-SRTP; DataChannels use SCTP over DTLS.
-4. **Zero Credential Exposure**: Client code only accesses public `anon` credentials; all mutations flow through `SECURITY DEFINER` procedures with RLS.
-5. **No Persistent Chat History**: Chat messages live strictly in browser component state and disappear when the tab closes.
+| Layer | Technologies |
+|---|---|
+| **Frontend Framework** | React 19, TypeScript, React Router DOM v7 |
+| **Styling & Icons** | Tailwind CSS v4, Lucide React |
+| **Build & Tooling** | Vite, Oxlint |
+| **Testing** | Vitest (15 suites, 151 unit and integration tests) |
+| **Backend & Database** | Supabase Free Tier (PostgreSQL, Row-Level Security, PL/pgSQL RPCs) |
+| **Authentication** | Supabase Anonymous Authentication |
+| **Realtime & Signaling** | Supabase Realtime (Private Broadcast Channels) |
+| **Peer-to-Peer Media** | WebRTC (`RTCPeerConnection`, `RTCDataChannel`, DTLS-SRTP) |
+| **STUN Infrastructure** | Public free STUN servers (Google STUN, Twilio STUN) |
+| **Hosting** | Cloudflare Pages Free Tier |
 
 ---
 
-## 5. Quick Start (Local Development)
+## Architecture
 
-### Prerequisites
-- Node.js `v20+` or `v24+`
-- npm `v10+` or `v11+`
-
-### 1. Clone & Install
-```bash
-git clone https://github.com/your-username/duowatch.git
-cd duowatch
-npm install
+```
+                     +---------------------------------------+
+                     |           Cloudflare Pages            |
+                     |       (Static SPA Distribution)       |
+                     +-------------------+-------------------+
+                                         |
+                                         v
+                         +-------------------------------+
+                         |        Host Browser           |
+                         +---------------+---------------+
+                                         |
+                 +-----------------------+-----------------------+
+                 |                                               |
+                 | WebRTC Signaling & Heartbeats                 | Direct P2P Media
+                 | (Supabase Realtime Broadcast & RPC)           | (DTLS-SRTP Streams)
+                 v                                               v
++-----------------------------------+             +-------------------------------+
+|         Supabase Backend          |             |       Partner Browser         |
+|  - Anonymous Auth                 |             +-------------------------------+
+|  - PostgreSQL RLS (Deny All Direct)             |
+|  - SECURITY DEFINER RPCs          |             |
+|  - Channel Access Authorization   |<------------+
+|  - Global Capacity Serialization  |  WebRTC Signaling & Heartbeats
++-----------------------------------+
 ```
 
-### 2. Environment Setup
+### Communication Flow
+1. **Authentication:** Both Host and Partner initialize independent anonymous Supabase Auth sessions (`auth.uid()`).
+2. **Room Creation:** The Host calls `duowatch_create_room`, which serializes access via `duowatch_global_state`, verifies global capacity, inserts the room record, and registers the Host atomically.
+3. **Guest Admission:** The Partner calls `duowatch_join_room` with the room code and guest passcode. The database validates credentials, verifies total participant capacity (maximum 2), checks role availability, and registers the Partner.
+4. **Signaling & Authorization:** Both participants subscribe to a private Supabase Realtime broadcast channel (`duowatch_room_<CODE>`). Channel access is authorized by the `duowatch_can_access_channel` database function, which verifies active membership and fresh heartbeat leases.
+5. **P2P Connection:** WebRTC SDP offers, answers, and ICE candidates are exchanged over the private broadcast channel. Once established, media tracks (video and audio) stream directly peer-to-peer.
+6. **Session Maintenance:** Both browsers transmit heartbeats every 25 seconds to renew their 90-second participant lease. If a lease expires, the slot is automatically reclaimed.
+
+---
+
+## Getting Started
+
+### Prerequisites
+- Node.js 20 or higher
+- npm 10 or higher
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/shariarhossaintanvir/DuoWatch.git
+cd DuoWatch
+```
+
+2. Install dependencies:
+```bash
+npm ci
+```
+
+3. Configure environment variables:
 ```bash
 cp .env.example .env
 ```
-*(By default, `VITE_ENABLE_LOCAL_FALLBACK=true` is enabled, allowing seamless two-tab testing on localhost without needing live Supabase credentials!)*
+Populate `.env` with your Supabase credentials (see [Environment Variables](#environment-variables)). For local development without a Supabase project, set `VITE_ENABLE_LOCAL_FALLBACK=true`.
 
-### 3. Run Development Server
+4. Start the development server:
 ```bash
 npm run dev
 ```
-Open `http://localhost:5173` in two separate browser tabs or private windows to test private cinema rooms in real time!
 
-### 4. Run Automated Tests
+5. Open `http://localhost:5173` in your browser.
+
+---
+
+## Environment Variables
+
+DuoWatch uses the following client-side environment variables prefixed with `VITE_`:
+
+| Variable | Required | Description |
+|---|---|---|
+| `VITE_SUPABASE_URL` | Yes (Production) | Your Supabase project URL (e.g., `https://your-project.supabase.co`) |
+| `VITE_SUPABASE_ANON_KEY` | Yes (Production) | Your Supabase public `anon` API key (JWT format) |
+| `VITE_STUN_SERVERS` | No | Comma-separated list of STUN server URIs. Defaults to Google and Twilio public STUN. |
+| `VITE_ENABLE_LOCAL_FALLBACK` | No | Set to `'true'` only for local offline development using browser `BroadcastChannel`. Must be `'false'` in production. |
+
+> **Security Notice:** Never provide a `service_role` key, database password, or secret token to `VITE_SUPABASE_ANON_KEY` or any client environment variable. DuoWatch strictly operates using the public `anon` key. All privileged mutations are secured by server-side PostgreSQL functions.
+
+---
+
+## Security & Privacy
+
+- **Public Source Code:** The codebase is open for inspection. No secrets, credentials, or private keys are stored in version control.
+- **Private Room Access:** Rooms are identified by unguessable room codes and protected by SHA-256 hashed guest passcodes. DuoWatch maintains no public room directory.
+- **Strict Row-Level Security (RLS):** All direct client table queries (`SELECT`, `INSERT`, `UPDATE`, `DELETE`) on `duowatch_rooms`, `duowatch_participants`, and `duowatch_global_state` are denied by RLS policies (`USING (false)`). Clients interact solely through parameter-validated `SECURITY DEFINER` functions.
+- **Fixed Search Path:** All PostgreSQL stored procedures enforce `SET search_path = ''` to prevent search-path injection vulnerabilities.
+- **Identity Binding:** Participant sessions are cryptographically bound to the caller's authenticated `auth.uid()`. An attacker cannot impersonate another participant or hijack a session slot.
+- **Server-Side Capacity Enforcement:** Global capacity and two-participant limits are enforced inside serialized database transactions holding row-level locks, preventing race conditions.
+- **Peer-to-Peer Media Transmission:** Media streams for local video files and screen sharing are transmitted directly between browsers via WebRTC with DTLS-SRTP encryption. Media frames never pass through or get stored on Supabase or Cloudflare servers.
+- **Privacy Boundaries:** Signaling metadata (SDP offers, answers, ICE candidates) traverses Supabase Realtime broadcast channels. Signaling messages are encrypted in transit via TLS. DuoWatch does not implement end-to-end encryption for signaling metadata beyond standard transport security; room passcodes should be shared only with trusted participants.
+
+---
+
+## Deployment
+
+### 1. Supabase Backend Setup
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Navigate to **Project Settings > API** to obtain your Project URL and public `anon` key.
+3. In the Supabase SQL Editor, execute the database migration scripts in order:
+   - `supabase/migrations/20261101_init_duowatch.sql` (Initial schema and RLS policies)
+   - `supabase/migrations/20261114_global_two_participant_capacity.sql` (Global capacity and concurrency locks)
+4. Ensure **Anonymous Sign-ins** are enabled under **Authentication > Providers > Anonymous**.
+5. Enable Realtime on the `duowatch_rooms` table if real-time state synchronization is desired.
+
+### 2. Cloudflare Pages Setup
+1. Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com/) and navigate to **Workers & Pages > Create application > Pages > Connect to Git**.
+2. Select the `DuoWatch` repository and set the production branch to `main`.
+3. Configure the build settings:
+   - **Framework preset:** `Vite` (or `None`)
+   - **Build command:** `npm run build`
+   - **Build output directory:** `dist`
+4. Under **Settings > Environment variables**, add:
+   - `VITE_SUPABASE_URL` = `<your-supabase-project-url>`
+   - `VITE_SUPABASE_ANON_KEY` = `<your-supabase-public-anon-key>`
+   - `VITE_ENABLE_LOCAL_FALLBACK` = `false`
+5. Deploy. Cloudflare Pages provides automatic HTTPS and uses `public/_redirects` for Single Page Application routing.
+
+---
+
+## Testing
+
+The project includes an extensive test suite verifying cryptographic operations, room authorization, capacity enforcement, YouTube synchronization, and security invariants.
+
 ```bash
+# Run all automated tests
 npm test
-```
-Executes the comprehensive Vitest test suite (Crypto, Security Audit, Room Capacity, and YouTube Sync).
 
-### 5. Production Build
-```bash
+# Run linter
+npm run lint
+
+# Compile TypeScript and build production bundle
 npm run build
 ```
-Generates an optimized static production bundle in `dist/` ready for Cloudflare Pages.
+
+### Test Scope
+- **Unit Tests:** Cryptographic token generation, SHA-256 hashing, YouTube drift compensation, time synchronization.
+- **Authorization & Security:** Validates that non-hosts cannot alter media state, invalid passcodes are rejected, expired sessions are denied, and third participants receive `ROOM_FULL`.
+- **Global Capacity:** Verifies atomic room creation, singleton row-locking, lease expiry reclamation, fail-closed availability checks, and role uniqueness.
+- **Static Analysis:** Validates zero leaked credentials, absence of paid TURN dependencies, and compliance with zero-cost architecture constraints.
 
 ---
 
-## 6. Project Architecture
+## Known Limitations
 
-```
-duowatch/
-├── dist/                     # Optimized production bundle
-├── public/
-│   ├── _redirects            # Cloudflare Pages SPA rewrite rules
-│   └── favicon.svg           # Cinema film projector icon
-├── src/
-│   ├── components/
-│   │   ├── chat/             # ChatSidebar, EmojiReactions
-│   │   ├── common/           # YoutubeIcon, StatusBadge
-│   │   ├── player/           # CinemaPlayer, YouTubePlayer, LocalFilePlayer, ScreenSharePlayer, PlayerControls
-│   │   ├── room/             # ParticipantCard, RoomShareModal, SettingsModal
-│   │   └── Navbar.tsx        # Cinema header with controls & lights dimmer
-│   ├── context/
-│   │   └── CinemaContext.tsx # Central React State & P2P WebRTC orchestration
-│   ├── lib/
-│   │   ├── audio.ts          # Web Audio API voice & FFT level analyzer
-│   │   ├── crypto.ts         # Web Crypto random tokens & SHA-256
-│   │   ├── roomService.ts    # Room creation, join validation & capacity
-│   │   ├── signaling.ts      # Dual-engine signaling (Supabase Realtime + BroadcastChannel)
-│   │   ├── supabase.ts       # Supabase client initializer
-│   │   └── webrtc.ts         # RTCPeerConnection, DataChannel, STUN & streams
-│   ├── pages/
-│   │   ├── CinemaRoomPage.tsx
-│   │   ├── CreateRoomPage.tsx
-│   │   ├── JoinRoomPage.tsx
-│   │   ├── LandingPage.tsx
-│   │   ├── NotFoundPage.tsx
-│   │   ├── PrivacyPage.tsx
-│   │   └── TermsPage.tsx
-│   ├── types/
-│   │   └── cinema.ts         # Domain TypeScript definitions
-│   ├── App.tsx               # Client router
-│   ├── index.css             # Tailwind v4 & dark cinema theme tokens
-│   └── main.tsx              # Application entry point
-├── supabase/
-│   └── migrations/           # PostgreSQL RLS & atomic join procedures
-├── tests/                    # Automated test suites
-├── docs/                     # Full technical & deployment documentation
-├── .env.example              # Environment variables template
-├── package.json
-├── tsconfig.json
-└── vite.config.ts
-```
+- **NAT & Firewall Traversal:** DuoWatch uses public STUN servers for WebRTC peer connection negotiation. In network configurations involving symmetric NATs or strict corporate firewalls, direct peer connections may fail without a TURN relay.
+- **Browser Compatibility for Local File Streaming:** Local video streaming requires browser support for `HTMLMediaElement.captureStream()` or `mozCaptureStream()`. Supported on Chromium-based browsers (Chrome, Edge, Brave, Opera) and Firefox. Not supported on iOS Safari.
+- **Video Codec Support:** Local file playback depends on the Host and Partner browsers sharing support for the video container and codec (typically H.264, VP8, VP9, or AV1 in MP4 or WebM containers). Unsupported codecs (e.g., HEVC/H.265 on certain platforms or AC3 audio) will not decode.
+- **Mobile Backgrounding:** Mobile operating systems may throttle or suspend WebRTC connections and WebSocket heartbeats when the browser tab is minimized or the screen is locked.
+- **Free Tier Constraints:** Operates within Supabase Free Tier quotas (concurrent Realtime connections and monthly active users).
+- **Voice Communication:** Voice and microphone transmission are intentionally excluded to maintain audio clarity, prevent echo feedback, and ensure consistent video audio synchronization.
 
 ---
 
-## 7. Documentation Index
+## Project Status
 
-- [Deployment Guide (Cloudflare Pages)](docs/deployment-guide.md)
-- [Supabase Setup & SQL Migrations](docs/supabase-setup.md)
-- [Security & Threat Model](docs/security.md)
-- [Test Report & Execution Results](docs/test-report.md)
-- [Known Limitations & Network Disclosures](docs/known-limitations.md)
-- [Troubleshooting & FAQ](docs/troubleshooting.md)
+- **Codebase:** Fully implemented with React 19, TypeScript, Tailwind CSS, and WebRTC.
+- **Automated Tests:** 15 test suites passing (151 of 151 tests).
+- **Production Build:** Clean compilation with Vite and TypeScript (`tsc -b && vite build`).
+- **Production Deployment:** Configured for Cloudflare Pages and Supabase Free Tier. Production database migration staged in `supabase/migrations/` awaiting owner deployment approval.
 
 ---
 
-## 8. License
+## License
 
-MIT License. Designed and developed for private, zero-cost synchronized viewing.
+All rights reserved. Proprietary software — see repository owner for licensing and usage inquiries.
