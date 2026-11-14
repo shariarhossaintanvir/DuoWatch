@@ -23,6 +23,25 @@ export const CreateRoomPage: React.FC = () => {
   const [platformAvailability, setPlatformAvailability] = useState<PlatformAvailability | null>(null);
   const [isCheckingAvailability, setIsCheckingAvailability] = useState<boolean>(true);
 
+  const refreshAvailability = () => {
+    setIsCheckingAvailability(true);
+    RoomService.checkPlatformAvailability()
+      .then((res) => {
+        setPlatformAvailability(res);
+        setIsCheckingAvailability(false);
+      })
+      .catch((err) => {
+        setPlatformAvailability({
+          success: false,
+          isAvailable: false,
+          status: 'error',
+          activeParticipants: 0,
+          error: err?.message || 'Failed to check platform availability.',
+        });
+        setIsCheckingAvailability(false);
+      });
+  };
+
   useEffect(() => {
     let mounted = true;
     RoomService.checkPlatformAvailability()
@@ -32,8 +51,17 @@ export const CreateRoomPage: React.FC = () => {
           setIsCheckingAvailability(false);
         }
       })
-      .catch(() => {
-        if (mounted) setIsCheckingAvailability(false);
+      .catch((err) => {
+        if (mounted) {
+          setPlatformAvailability({
+            success: false,
+            isAvailable: false,
+            status: 'error',
+            activeParticipants: 0,
+            error: err?.message || 'Failed to check platform availability.',
+          });
+          setIsCheckingAvailability(false);
+        }
       });
     return () => {
       mounted = false;
@@ -74,28 +102,10 @@ export const CreateRoomPage: React.FC = () => {
         return;
       }
 
-      // Explicitly register Host participant with their cryptographic session credential
-      const joinResult = await RoomService.joinRoom(
-        result.room.roomCode,
-        myParticipantId,
-        hostName.trim(),
-        result.room.ownerToken!,
-        'owner'
-      );
+      // Host is already admitted atomically in the database during createRoom
+      sessionStorage.setItem(`duowatch_session_${result.room.roomCode}`, JSON.stringify(result.room));
 
-      if (!joinResult.success || !joinResult.room) {
-        setErrorMessage(joinResult.error || 'Failed to initialize host participant session.');
-        setIsLoading(false);
-        return;
-      }
-
-      const sessionToJoin = {
-        ...joinResult.room,
-        guestPasscode: result.room.guestPasscode || joinResult.room.guestPasscode,
-      };
-      sessionStorage.setItem(`duowatch_session_${result.room.roomCode}`, JSON.stringify(sessionToJoin));
-
-      const joined = await joinSession(sessionToJoin, hostName.trim());
+      const joined = await joinSession(result.room, hostName.trim());
       if (joined) {
         navigate(`/room/${result.room.roomCode}`);
       } else {
@@ -169,6 +179,44 @@ export const CreateRoomPage: React.FC = () => {
               });
             }}
           />
+        </main>
+        <Footer />
+      </div>
+    );
+  }
+
+  // If platform availability check failed (fail-closed guard)
+  if (platformAvailability && platformAvailability.status === 'error') {
+    return (
+      <div className="min-h-screen bg-[#0b0c10] text-gray-100 flex flex-col justify-between selection:bg-amber-500 selection:text-black">
+        <SEO 
+          title="Availability Check Failed | DuoWatch" 
+          description="Unable to verify platform availability."
+          path="/create"
+        />
+        <Navbar />
+        <main className="flex-1 flex flex-col items-center justify-center py-8 sm:py-12 px-4 w-full max-w-md mx-auto text-center">
+          <div className="w-12 h-12 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 flex items-center justify-center mb-4">
+            <AlertCircle className="w-6 h-6 text-red-400" />
+          </div>
+          <h2 className="text-xl font-bold font-['Outfit'] text-white mb-2">Platform Verification Unavailable</h2>
+          <p className="text-xs text-gray-400 leading-relaxed mb-6">
+            {platformAvailability.error || 'We could not verify cinema availability with the server. To ensure platform capacity rules, please retry in a moment.'}
+          </p>
+          <div className="flex items-center gap-3 w-full">
+            <Link
+              to="/"
+              className="flex-1 bg-[#14161d] border border-[#282d3c] hover:bg-[#1c1f2a] text-gray-300 font-semibold text-xs py-2.5 rounded-lg transition-colors text-center"
+            >
+              Back to Home
+            </Link>
+            <button
+              onClick={refreshAvailability}
+              className="flex-1 bg-amber-500 hover:bg-amber-400 text-black font-semibold text-xs py-2.5 rounded-lg transition-colors"
+            >
+              Retry Connection
+            </button>
+          </div>
         </main>
         <Footer />
       </div>

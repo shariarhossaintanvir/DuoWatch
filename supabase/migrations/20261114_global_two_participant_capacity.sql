@@ -15,9 +15,66 @@
 --   9. Least-privilege EXECUTE permissions: REVOKED from anon, GRANTED to authenticated
 -- ============================================================================
 
--- 0. Decommission legacy active rooms and participants to guarantee clean constraint creation
-UPDATE public.duowatch_rooms SET is_active = false WHERE is_active = true;
-DELETE FROM public.duowatch_participants;
+-- 0. Safe Data-Preserving Pre-Migration Verification
+-- Inspects existing rooms and participants using read-only checks.
+-- Fails safely with diagnostic error if incompatible legacy active sessions exist.
+DO $$
+DECLARE
+    v_active_room_count INT;
+    v_existing_active_id UUID;
+    v_duplicate_roles INT;
+    v_excess_participants INT;
+BEGIN
+    -- 1. Check for multiple active rooms
+    SELECT count(*) INTO v_active_room_count
+    FROM public.duowatch_rooms
+    WHERE is_active = true;
+
+    IF v_active_room_count > 1 THEN
+        RAISE EXCEPTION 'MIGRATION_BLOCKED: Detected % active rooms in public.duowatch_rooms. Phase 21 enforces GLOBAL_ACTIVE_ROOMS <= 1. To preserve active sessions and prevent data loss, the migration has safely aborted. Please allow active rooms to conclude or perform session draining before reapplying.', v_active_room_count;
+    END IF;
+
+    -- 2. If exactly one active room exists, verify participant integrity
+    IF v_active_room_count = 1 THEN
+        SELECT id INTO v_existing_active_id
+        FROM public.duowatch_rooms
+        WHERE is_active = true;
+
+        -- Check for duplicate roles in the active room
+        SELECT count(*) INTO v_duplicate_roles
+        FROM (
+            SELECT role FROM public.duowatch_participants
+            WHERE room_id = v_existing_active_id
+            GROUP BY role
+            HAVING count(*) > 1
+        ) dupes;
+
+        IF v_duplicate_roles > 0 THEN
+            RAISE EXCEPTION 'MIGRATION_BLOCKED: Active room % contains duplicate participant roles. Phase 21 requires at most 1 Host and at most 1 Partner. Migration safely aborted.', v_existing_active_id;
+        END IF;
+
+        -- Check total participant count in active room
+        SELECT count(*) INTO v_excess_participants
+        FROM public.duowatch_participants
+        WHERE room_id = v_existing_active_id;
+
+        IF v_excess_participants > 2 THEN
+            RAISE EXCEPTION 'MIGRATION_BLOCKED: Active room % has % participants. Phase 21 enforces GLOBAL_ACTIVE_PARTICIPANTS <= 2. Migration safely aborted.', v_existing_active_id, v_excess_participants;
+        END IF;
+    END IF;
+
+    -- 3. Check for duplicate (room_id, role) across historical participants table before applying unique constraint
+    SELECT count(*) INTO v_duplicate_roles
+    FROM (
+        SELECT room_id, role FROM public.duowatch_participants
+        GROUP BY room_id, role
+        HAVING count(*) > 1
+    ) all_dupes;
+
+    IF v_duplicate_roles > 0 THEN
+        RAISE EXCEPTION 'MIGRATION_BLOCKED: Detected duplicate (room_id, role) entries in public.duowatch_participants. Please reconcile participant records before applying uq_duowatch_participants_room_role constraint.';
+    END IF;
+END $$;
 
 -- 1. Singleton Global State Table for Concurrency Serialization
 CREATE TABLE IF NOT EXISTS public.duowatch_global_state (
@@ -26,10 +83,12 @@ CREATE TABLE IF NOT EXISTS public.duowatch_global_state (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Seed singleton row if absent
+-- Seed singleton row preserving existing active room if present
 INSERT INTO public.duowatch_global_state (id, active_room_id, updated_at)
-VALUES (1, NULL, NOW())
-ON CONFLICT (id) DO NOTHING;
+VALUES (1, (SELECT id FROM public.duowatch_rooms WHERE is_active = true LIMIT 1), NOW())
+ON CONFLICT (id) DO UPDATE SET 
+    active_room_id = COALESCE(duowatch_global_state.active_room_id, EXCLUDED.active_room_id),
+    updated_at = NOW();
 
 -- Enable RLS on global state table & deny direct table operations
 ALTER TABLE public.duowatch_global_state ENABLE ROW LEVEL SECURITY;
@@ -94,8 +153,8 @@ BEGIN
           AND role = 'owner'
           AND last_seen >= (pg_catalog.now() - INTERVAL '90 seconds');
 
-        -- If Host has abandoned room (and room is older than 30s creation grace period), terminate room safely
-        IF v_host_count = 0 AND v_active_room.created_at < (pg_catalog.now() - INTERVAL '30 seconds') THEN
+        -- If Host has abandoned room, terminate room safely (atomic creation guarantees host is never absent at creation)
+        IF v_host_count = 0 THEN
             UPDATE public.duowatch_rooms SET is_active = false WHERE id = v_active_room.id;
             DELETE FROM public.duowatch_participants WHERE room_id = v_active_room.id;
             UPDATE public.duowatch_global_state SET active_room_id = NULL, updated_at = pg_catalog.now() WHERE id = 1;
@@ -129,6 +188,9 @@ DECLARE
 BEGIN
     -- Acquire serialization lock on global state
     PERFORM 1 FROM public.duowatch_global_state WHERE id = 1 FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CRITICAL: duowatch_global_state singleton row missing. Concurrency lock failed.';
+    END IF;
 
     -- Reconcile expired leases
     PERFORM public.duowatch_internal_reconcile();
@@ -169,13 +231,17 @@ BEGIN
 END;
 $$;
 
--- 6. RPC: Create Global Session (Strict GLOBAL_ACTIVE_ROOMS <= 1 Invariant)
+-- 6. RPC: Create Global Session with Atomic Host Admission (Strict GLOBAL_ACTIVE_ROOMS <= 1 Invariant)
+DROP FUNCTION IF EXISTS public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
 CREATE OR REPLACE FUNCTION public.duowatch_create_room(
     p_room_code VARCHAR,
     p_room_name VARCHAR,
     p_owner_token_hash VARCHAR,
     p_guest_passcode_hash VARCHAR,
-    p_initial_mode VARCHAR DEFAULT 'youtube'
+    p_initial_mode VARCHAR DEFAULT 'youtube',
+    p_host_participant_id VARCHAR DEFAULT NULL,
+    p_host_session_token_hash VARCHAR DEFAULT NULL,
+    p_host_display_name VARCHAR DEFAULT 'Host'
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -206,12 +272,25 @@ BEGIN
         RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'INVALID_GUEST_PASSCODE_HASH');
     END IF;
 
+    IF p_host_participant_id IS NOT NULL THEN
+        IF pg_catalog.length(p_host_participant_id) < 3 OR pg_catalog.length(p_host_participant_id) > 64 THEN
+            RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'INVALID_HOST_PARTICIPANT_ID');
+        END IF;
+
+        IF p_host_session_token_hash IS NULL OR pg_catalog.length(p_host_session_token_hash) != 64 THEN
+            RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'INVALID_HOST_SESSION_TOKEN_HASH');
+        END IF;
+    END IF;
+
     IF p_initial_mode IS NOT NULL AND p_initial_mode NOT IN ('youtube', 'local', 'screen') THEN
         RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'INVALID_MEDIA_MODE');
     END IF;
 
     -- 3. Acquire atomic serialization lock on global state
     PERFORM 1 FROM public.duowatch_global_state WHERE id = 1 FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CRITICAL: duowatch_global_state singleton row missing. Concurrency lock failed.';
+    END IF;
 
     -- 4. Reconcile any abandoned or expired rooms
     PERFORM public.duowatch_internal_reconcile();
@@ -244,7 +323,30 @@ BEGIN
     )
     RETURNING * INTO v_room;
 
-    -- 7. Update global state pointer
+    -- 7. Atomically insert Host participant if host credentials are provided
+    IF p_host_participant_id IS NOT NULL AND p_host_session_token_hash IS NOT NULL THEN
+        INSERT INTO public.duowatch_participants (
+            room_id,
+            participant_id,
+            user_id,
+            session_token_hash,
+            display_name,
+            role,
+            last_seen,
+            joined_at
+        ) VALUES (
+            v_room.id,
+            p_host_participant_id,
+            v_creator_uid,
+            p_host_session_token_hash,
+            COALESCE(NULLIF(p_host_display_name, ''), 'Host'),
+            'owner',
+            pg_catalog.now(),
+            pg_catalog.now()
+        );
+    END IF;
+
+    -- 8. Update global state pointer
     UPDATE public.duowatch_global_state 
     SET active_room_id = v_room.id, updated_at = pg_catalog.now() 
     WHERE id = 1;
@@ -254,6 +356,10 @@ BEGIN
         'roomId', v_room.id,
         'roomCode', v_room.room_code,
         'roomName', v_room.room_name,
+        'role', 'owner',
+        'participantId', p_host_participant_id,
+        'currentMode', v_room.current_mode,
+        'mediaState', v_room.media_state,
         'expiresAt', v_room.expires_at
     );
 EXCEPTION 
@@ -308,6 +414,9 @@ BEGIN
 
     -- 3. Acquire atomic serialization lock on global state
     PERFORM 1 FROM public.duowatch_global_state WHERE id = 1 FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CRITICAL: duowatch_global_state singleton row missing. Concurrency lock failed.';
+    END IF;
 
     -- 4. Reconcile stale participants and expired rooms
     PERFORM public.duowatch_internal_reconcile();
@@ -490,6 +599,9 @@ BEGIN
 
     -- Acquire serialization lock
     PERFORM 1 FROM public.duowatch_global_state WHERE id = 1 FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CRITICAL: duowatch_global_state singleton row missing. Concurrency lock failed.';
+    END IF;
 
     SELECT * INTO v_room FROM public.duowatch_rooms WHERE room_code = p_room_code FOR UPDATE;
     IF NOT FOUND THEN
@@ -547,6 +659,9 @@ BEGIN
 
     -- Acquire serialization lock
     PERFORM 1 FROM public.duowatch_global_state WHERE id = 1 FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CRITICAL: duowatch_global_state singleton row missing. Concurrency lock failed.';
+    END IF;
 
     SELECT * INTO v_room FROM public.duowatch_rooms WHERE room_code = p_room_code FOR UPDATE;
     IF NOT FOUND THEN
@@ -607,7 +722,7 @@ $$;
 
 -- 12. Least-Privilege Execution Permissions
 REVOKE ALL ON FUNCTION public.duowatch_get_platform_availability() FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION public.duowatch_join_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION public.duowatch_heartbeat(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION public.duowatch_leave_room(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
@@ -618,7 +733,7 @@ REVOKE ALL ON FUNCTION public.duowatch_can_access_channel(TEXT) FROM PUBLIC, ano
 GRANT EXECUTE ON FUNCTION public.duowatch_get_platform_availability() TO anon, authenticated;
 
 -- All room creation, join, and mutation operations remain strictly authenticated-only
-GRANT EXECUTE ON FUNCTION public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.duowatch_join_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.duowatch_heartbeat(VARCHAR, VARCHAR, VARCHAR) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.duowatch_leave_room(VARCHAR, VARCHAR, VARCHAR) TO authenticated;

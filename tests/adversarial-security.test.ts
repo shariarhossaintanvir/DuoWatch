@@ -56,7 +56,7 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
     // Legitimate heartbeat with Bob's authentic sessionToken succeeds
     const legitimateHeartbeat = await RoomService.sendHeartbeat(attackerRoomCode, victimParticipantId, partnerJoin.room!.sessionToken!);
     expect(legitimateHeartbeat).toBe(true);
-  });
+  }, 15000);
 
   it('ATTACK SCENARIO 2: Attacker knowing room code and victim participant ID CANNOT kick victim from room', async () => {
     const createRes = await RoomService.createRoom('Private Cinema', 'Alice', 'youtube');

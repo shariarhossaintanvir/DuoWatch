@@ -23,13 +23,37 @@ export const LandingPage: React.FC = () => {
   const [joinError, setJoinError] = useState<string | null>(null);
   const [platformAvailability, setPlatformAvailability] = useState<PlatformAvailability | null>(null);
 
+  const checkAvailability = () => {
+    RoomService.checkPlatformAvailability()
+      .then((res) => setPlatformAvailability(res))
+      .catch((err) => {
+        setPlatformAvailability({
+          success: false,
+          isAvailable: false,
+          status: 'error',
+          activeParticipants: 0,
+          error: err?.message || 'Platform availability check failed.',
+        });
+      });
+  };
+
   useEffect(() => {
     let mounted = true;
     RoomService.checkPlatformAvailability()
       .then((res) => {
         if (mounted) setPlatformAvailability(res);
       })
-      .catch(() => { });
+      .catch((err) => {
+        if (mounted) {
+          setPlatformAvailability({
+            success: false,
+            isAvailable: false,
+            status: 'error',
+            activeParticipants: 0,
+            error: err?.message || 'Platform availability check failed.',
+          });
+        }
+      });
 
     const interval = window.setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
@@ -62,6 +86,7 @@ export const LandingPage: React.FC = () => {
   };
 
   const isOccupied = platformAvailability?.status === 'occupied';
+  const isError = platformAvailability?.status === 'error';
 
   return (
     <div className="min-h-screen bg-[#0b0c10] text-gray-100 flex flex-col justify-between selection:bg-amber-500 selection:text-black overflow-x-clip">
@@ -82,6 +107,11 @@ export const LandingPage: React.FC = () => {
             <>
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />
               <span>Global Capacity: 2/2 In Session • Platform Occupied</span>
+            </>
+          ) : isError ? (
+            <>
+              <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+              <span>Platform Verification Unavailable</span>
             </>
           ) : (
             <>
@@ -112,6 +142,23 @@ export const LandingPage: React.FC = () => {
           </div>
         )}
 
+        {/* Error Notification Banner */}
+        {isError && (
+          <div className="w-full max-w-lg mb-4 p-3.5 rounded-lg bg-[#14161d] border border-red-500/40 text-xs text-gray-300 flex items-start gap-2.5 text-left shadow-lg">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <div className="flex-1 text-left">
+              <p className="font-semibold text-red-300 mb-0.5">Platform Status Unavailable</p>
+              <p className="text-gray-400">{platformAvailability?.error || 'Unable to verify cinema availability right now. Please retry shortly.'}</p>
+            </div>
+            <button
+              onClick={checkAvailability}
+              className="bg-[#1c1f2a] hover:bg-[#282d3c] text-amber-400 text-xs font-semibold px-2.5 py-1.5 rounded transition-colors shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Primary Call to Action & Quick Join Box */}
         <div className="w-full max-w-lg flex flex-col sm:flex-row items-center justify-center gap-3 mb-3">
           {isOccupied ? (
@@ -122,6 +169,14 @@ export const LandingPage: React.FC = () => {
               <Lock className="w-4 h-4 text-amber-400" />
               View Waiting Room
             </Link>
+          ) : isError ? (
+            <button
+              onClick={checkAvailability}
+              className="w-full sm:w-auto bg-[#1c1f2a] border border-red-500/50 hover:bg-[#282d3c] text-gray-200 font-semibold text-sm px-6 py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <AlertCircle className="w-4 h-4 text-red-400" />
+              Retry Platform Check
+            </button>
           ) : (
             <Link
               to="/create"

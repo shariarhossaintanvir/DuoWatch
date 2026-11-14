@@ -2,7 +2,7 @@ export type MovieMode = 'youtube' | 'local' | 'screen';
 
 export type ParticipantRole = 'owner' | 'partner';
 
-export type PlatformStatus = 'available' | 'waiting_partner' | 'occupied';
+export type PlatformStatus = 'available' | 'waiting_partner' | 'occupied' | 'error';
 
 export interface PlatformAvailability {
   success: boolean;
@@ -84,6 +84,7 @@ export interface RoomSession {
   role: ParticipantRole;
   ownerToken?: string; // Kept in memory/sessionStorage only for owner
   guestPasscode?: string;
+  participantId?: string;
   sessionToken?: string; // Cryptographic per-participant session credential for authenticated RPC calls
   currentMode: MovieMode;
   mediaState: MediaState;

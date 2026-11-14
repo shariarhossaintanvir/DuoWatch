@@ -541,4 +541,112 @@ describe('Phase 21: Strict Global Two-Participant Capacity Suite', () => {
     expect(sql).toContain('REVOKE ALL ON FUNCTION public.duowatch_create_room');
     expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.duowatch_create_room');
   });
+
+  // Scenario 30: Atomic Host Admission in createRoom
+  it('Scenario 30: Atomic host admission creates room and admits host in single atomic step', async () => {
+    const createRes = await RoomService.createRoom('Atomic Cinema', 'HostAlice', 'youtube', 'host-atomic-id');
+    expect(createRes.success).toBe(true);
+    expect(createRes.room).toBeDefined();
+
+    const room = createRes.room!;
+    expect(room.role).toBe('owner');
+    expect(room.participantId).toBe('host-atomic-id');
+    expect(room.sessionToken).toBeDefined();
+
+    // Immediately after creation, the platform is already in waiting_partner (1 active participant)
+    const availability = await RoomService.checkPlatformAvailability();
+    expect(availability.isAvailable).toBe(false);
+    expect(availability.status).toBe('waiting_partner');
+    expect(availability.activeParticipants).toBe(1);
+
+    // Host can send heartbeats immediately without needing a separate joinRoom call
+    const heartbeatSuccess = await RoomService.sendHeartbeat(
+      room.roomCode,
+      room.participantId!,
+      room.sessionToken!
+    );
+    expect(heartbeatSuccess).toBe(true);
+  });
+
+  // Scenario 31: Elimination of 30-second grace period on host abandonment
+  it('Scenario 31: Room is reclaimed immediately when 90s lease expires without 30s grace delay', async () => {
+    vi.useFakeTimers();
+    try {
+      const createRes = await RoomService.createRoom('Immediate Reclaim Room', 'Alice', 'youtube', 'host-alice');
+      const room = createRes.room!;
+
+      // Advance clock past 90s host lease
+      vi.advanceTimersByTime(95000);
+
+      // Next platform availability check immediately reconciles and frees the platform
+      const availability = await RoomService.checkPlatformAvailability();
+      expect(availability.success).toBe(true);
+      expect(availability.isAvailable).toBe(true);
+      expect(availability.status).toBe('available');
+      expect(availability.activeParticipants).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Scenario 32: Fail-closed platform availability under error conditions
+  it('Scenario 32: Availability checks are strictly fail-closed on RPC failure, timeout, or malformed data', async () => {
+    vi.spyOn(supabaseModule, 'isSupabaseConfigured').mockReturnValue(true);
+
+    // Sub-case A: RPC returns error (e.g. function missing or DB error)
+    const mockClientError = {
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { message: 'function duowatch_get_platform_availability does not exist' },
+      }),
+    };
+    vi.spyOn(supabaseModule, 'getSupabaseClient').mockReturnValue(mockClientError as any);
+
+    const resError = await RoomService.checkPlatformAvailability();
+    expect(resError.success).toBe(false);
+    expect(resError.isAvailable).toBe(false); // Fail-closed
+    expect(resError.status).toBe('error');
+
+    // Sub-case B: Network timeout or rejected promise
+    const mockClientTimeout = {
+      rpc: vi.fn().mockRejectedValue(new Error('Connection timed out after 5000ms')),
+    };
+    vi.spyOn(supabaseModule, 'getSupabaseClient').mockReturnValue(mockClientTimeout as any);
+
+    const resTimeout = await RoomService.checkPlatformAvailability();
+    expect(resTimeout.success).toBe(false);
+    expect(resTimeout.isAvailable).toBe(false); // Fail-closed
+    expect(resTimeout.status).toBe('error');
+
+    // Sub-case C: Malformed data (data.success is false or missing)
+    const mockClientMalformed = {
+      rpc: vi.fn().mockResolvedValue({
+        data: { success: false, error: 'Database initializing' },
+        error: null,
+      }),
+    };
+    vi.spyOn(supabaseModule, 'getSupabaseClient').mockReturnValue(mockClientMalformed as any);
+
+    const resMalformed = await RoomService.checkPlatformAvailability();
+    expect(resMalformed.success).toBe(false);
+    expect(resMalformed.isAvailable).toBe(false); // Fail-closed
+    expect(resMalformed.status).toBe('error');
+  });
+
+  // Scenario 33: Non-destructive data-preserving migration verification
+  it('Scenario 33: Migration file contains safe non-destructive pre-migration checks', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const migrationPath = path.resolve(process.cwd(), 'supabase/migrations/20261114_global_two_participant_capacity.sql');
+    const sql = fs.readFileSync(migrationPath, 'utf-8');
+
+    // Must NOT contain unconditional destructive deletes or updates at the top
+    expect(sql).not.toMatch(/^UPDATE public\.duowatch_rooms SET is_active = false;/m);
+    expect(sql).not.toMatch(/^DELETE FROM public\.duowatch_participants;/m);
+
+    // Must contain safe diagnostic exception blocks
+    expect(sql).toContain('RAISE EXCEPTION');
+    expect(sql).toContain('MIGRATION_BLOCKED: Detected % active rooms in public.duowatch_rooms');
+    expect(sql).toContain('CRITICAL: duowatch_global_state singleton row missing');
+  });
 });

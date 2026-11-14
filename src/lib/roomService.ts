@@ -88,9 +88,8 @@ function cleanExpiredLocalRooms(): void {
         }
       }
     }
-    // If room is older than 30s and has no active host, consider it abandoned and reclaim
-    const isJustCreated = now - room.createdAt < 30000;
-    if (!hasActiveHost && !isJustCreated) {
+    // Atomic host creation guarantees host is admitted upon creation. If host is inactive > 90s, reclaim immediately
+    if (!hasActiveHost) {
       localStorage.removeItem(`${LOCAL_STORAGE_KEY_PREFIX}${activeCode}`);
       localStorage.removeItem(LOCAL_ACTIVE_ROOM_KEY);
       return;
@@ -111,6 +110,7 @@ export class RoomService {
   /**
    * Check global platform availability.
    * Minimal sanitized public endpoint: reveals zero private session or media data.
+   * Fail-closed: does not assume available if database or network fails.
    */
   public static async checkPlatformAvailability(): Promise<PlatformAvailability> {
     const supabase = getSupabaseClient();
@@ -119,13 +119,13 @@ export class RoomService {
         await getOrInitAnonymousSession();
         const { data, error } = await supabase.rpc('duowatch_get_platform_availability');
         if (error || !data || !data.success) {
-          // If RPC fails or table doesn't have Phase 21 function yet, fallback safely
+          // Strictly fail-closed: do not assume platform is available on error
           return {
             success: false,
-            isAvailable: true,
-            status: 'available',
+            isAvailable: false,
+            status: 'error',
             activeParticipants: 0,
-            error: error?.message,
+            error: error?.message || 'Platform availability service is temporarily unavailable.',
           };
         }
         return {
@@ -137,10 +137,10 @@ export class RoomService {
       } catch (err: any) {
         return {
           success: false,
-          isAvailable: true,
-          status: 'available',
+          isAvailable: false,
+          status: 'error',
           activeParticipants: 0,
-          error: err.message,
+          error: err?.message || 'Platform availability check failed.',
         };
       }
     }
@@ -187,21 +187,25 @@ export class RoomService {
   }
 
   /**
-   * Create a new secure private cinema room with host session credentials.
+   * Create a new secure private cinema room with atomic host session credentials.
    * Strictly enforces GLOBAL_ACTIVE_ROOMS <= 1 invariant.
    */
   public static async createRoom(
     roomName: string,
-    _hostDisplayName?: string,
+    hostDisplayName?: string,
     initialMode: MovieMode = 'youtube',
-    _hostParticipantId?: string
+    hostParticipantId?: string
   ): Promise<CreateRoomResult> {
     const roomCode = generateRoomCode();
     const ownerToken = generateSecureToken(32);
     const guestPasscode = generateSecureToken(16);
+    const hostSessionToken = generateSecureToken(32);
+    const finalHostDisplayName = hostDisplayName?.trim() || 'Host';
+    const shouldAtomicallyAdmitHost = Boolean(hostParticipantId);
 
     const ownerTokenHash = await sha256(ownerToken);
     const guestPasscodeHash = await sha256(guestPasscode);
+    const hostSessionTokenHash = await sha256(hostSessionToken);
 
     const initialMediaState: MediaState = {
       mode: initialMode,
@@ -227,13 +231,57 @@ export class RoomService {
           };
         }
 
-        const { data, error } = await supabase.rpc('duowatch_create_room', {
-          p_room_code: roomCode,
-          p_room_name: roomName.trim() || 'Private Cinema',
-          p_owner_token_hash: ownerTokenHash,
-          p_guest_passcode_hash: guestPasscodeHash,
-          p_initial_mode: initialMode,
-        });
+        let data: any = null;
+        let error: any = null;
+
+        if (shouldAtomicallyAdmitHost) {
+          const res = await supabase.rpc('duowatch_create_room', {
+            p_room_code: roomCode,
+            p_room_name: roomName.trim() || 'Private Cinema',
+            p_owner_token_hash: ownerTokenHash,
+            p_guest_passcode_hash: guestPasscodeHash,
+            p_initial_mode: initialMode,
+            p_host_participant_id: hostParticipantId,
+            p_host_session_token_hash: hostSessionTokenHash,
+            p_host_display_name: finalHostDisplayName,
+          });
+          data = res.data;
+          error = res.error;
+
+          // Backward-compatible fallback for unmigrated database:
+          if (error && (error.message?.includes('schema cache') || error.message?.includes('not find the function'))) {
+            const fallbackRes = await supabase.rpc('duowatch_create_room', {
+              p_room_code: roomCode,
+              p_room_name: roomName.trim() || 'Private Cinema',
+              p_owner_token_hash: ownerTokenHash,
+              p_guest_passcode_hash: guestPasscodeHash,
+              p_initial_mode: initialMode,
+            });
+            if (!fallbackRes.error && fallbackRes.data?.success) {
+              data = fallbackRes.data;
+              error = null;
+              await supabase.rpc('duowatch_join_room', {
+                p_room_code: roomCode,
+                p_participant_id: hostParticipantId,
+                p_display_name: finalHostDisplayName,
+                p_token_hash: ownerTokenHash,
+                p_session_token_hash: hostSessionTokenHash,
+                p_role: 'owner',
+              });
+            }
+          }
+        } else {
+          // Standard creation without auto-admission (for callers that invoke joinRoom separately)
+          const res = await supabase.rpc('duowatch_create_room', {
+            p_room_code: roomCode,
+            p_room_name: roomName.trim() || 'Private Cinema',
+            p_owner_token_hash: ownerTokenHash,
+            p_guest_passcode_hash: guestPasscodeHash,
+            p_initial_mode: initialMode,
+          });
+          data = res.data;
+          error = res.error;
+        }
 
         if (error || !data || !data.success) {
           const errCode = error?.message || data?.error || 'Database room creation failed.';
@@ -247,6 +295,8 @@ export class RoomService {
           role: 'owner',
           ownerToken,
           guestPasscode,
+          sessionToken: shouldAtomicallyAdmitHost ? hostSessionToken : undefined,
+          participantId: shouldAtomicallyAdmitHost ? hostParticipantId : undefined,
           currentMode: initialMode,
           mediaState: initialMediaState,
           createdAt: Date.now(),
@@ -289,6 +339,16 @@ export class RoomService {
       participants: new Map(),
     };
 
+    if (shouldAtomicallyAdmitHost && hostParticipantId) {
+      localRecord.participants.set(hostParticipantId, {
+        id: hostParticipantId,
+        displayName: finalHostDisplayName,
+        role: 'owner',
+        sessionTokenHash: hostSessionTokenHash,
+        lastSeen: Date.now(),
+      });
+    }
+
     saveLocalRoom(localRecord);
     localStorage.setItem(LOCAL_ACTIVE_ROOM_KEY, roomCode);
 
@@ -299,6 +359,8 @@ export class RoomService {
       role: 'owner',
       ownerToken,
       guestPasscode,
+      sessionToken: shouldAtomicallyAdmitHost ? hostSessionToken : undefined,
+      participantId: shouldAtomicallyAdmitHost ? hostParticipantId : undefined,
       currentMode: initialMode,
       mediaState: initialMediaState,
       createdAt: localRecord.createdAt,
