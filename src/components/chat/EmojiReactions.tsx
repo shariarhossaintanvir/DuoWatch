@@ -12,7 +12,7 @@ export const EmojiReactions: React.FC = () => {
         <button
           key={emoji}
           onClick={() => sendReaction(emoji)}
-          className="hover:scale-125 active:scale-95 text-lg p-1.5 rounded-lg hover:bg-[#1c1f2a] transition-all shrink-0 select-none"
+          className="hover:scale-110 text-lg p-1.5 rounded-lg hover:bg-[#1c1f2a] transition-all shrink-0 select-none"
           title={`React with ${emoji}`}
         >
           {emoji}

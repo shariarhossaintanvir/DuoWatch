@@ -35,14 +35,13 @@ export const CinemaPlayer: React.FC = () => {
   };
 
   return (
-    <div 
+    <div
       ref={playerContainerRef}
-      className={`relative w-full flex-1 flex flex-col bg-black rounded-2xl overflow-hidden border border-[#282d3c] shadow-2xl transition-all duration-500 ${
-        cinemaLights ? 'ring-2 ring-amber-500/30 shadow-[0_0_80px_rgba(245,158,11,0.15)]' : ''
-      }`}
+      className={`relative w-full flex-1 flex flex-col bg-black rounded-xl overflow-hidden border border-[#282d3c] shadow-2xl transition-all duration-500 ${cinemaLights ? 'ring-2 ring-amber-500/30 shadow-[0_0_80px_rgba(245,158,11,0.15)]' : ''
+        }`}
     >
       {/* Main Video Viewport */}
-      <div className="relative flex-1 w-full h-full min-h-[360px] bg-[#050608] flex items-center justify-center overflow-hidden">
+      <div className="relative flex-1 w-full min-h-[200px] xs:min-h-[240px] sm:min-h-[300px] md:min-h-[360px] bg-[#050608] flex items-center justify-center overflow-hidden">
         {mediaState.mode === 'youtube' && <YouTubePlayer />}
         {mediaState.mode === 'local' && <LocalFilePlayer />}
         {mediaState.mode === 'screen' && <ScreenSharePlayer />}
@@ -53,10 +52,10 @@ export const CinemaPlayer: React.FC = () => {
             <div
               key={r.id}
               style={{ left: `${r.xOffset}%` }}
-              className="absolute bottom-12 text-4xl animate-bounce-float select-none drop-shadow-lg flex flex-col items-center"
+              className="absolute bottom-12 text-3xl sm:text-4xl animate-bounce-float select-none drop-shadow-lg flex flex-col items-center"
             >
               <span>{r.emoji}</span>
-              <span className="text-[10px] text-white/80 bg-black/60 px-1.5 py-0.5 rounded-full mt-1 font-sans">
+              <span className="text-[10px] text-white/80 bg-black/60 px-1.5 py-0.5 rounded-md mt-1 font-sans">
                 {r.senderName}
               </span>
             </div>
@@ -65,9 +64,9 @@ export const CinemaPlayer: React.FC = () => {
       </div>
 
       {/* Cinema Player Controls */}
-      <PlayerControls 
-        onToggleFullscreen={toggleFullscreen} 
-        isFullscreen={isFullscreen} 
+      <PlayerControls
+        onToggleFullscreen={toggleFullscreen}
+        isFullscreen={isFullscreen}
       />
     </div>
   );

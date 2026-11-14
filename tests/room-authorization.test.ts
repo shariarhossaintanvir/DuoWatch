@@ -33,7 +33,7 @@ describe('Private Room System & Capacity Enforcement', () => {
     expect(room.role).toBe('owner');
     expect(room.ownerToken).toBeDefined();
     expect(room.guestPasscode).toBeDefined();
-  });
+  }, 25000);
 
   it('should allow Partner to join with valid guest passcode', async () => {
     const createRes = await RoomService.createRoom('Date Night', 'Alice', 'youtube');

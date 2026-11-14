@@ -1,4 +1,4 @@
-import { getSupabaseClient, isSupabaseConfigured } from './supabase';
+import { getSupabaseClient, isSupabaseConfigured, getOrInitAnonymousSession, isLocalFallbackEnabled } from './supabase';
 import type { WebRTCSignalPayload, ParticipantRole } from '../types/cinema';
 
 export interface PeerInfo {
@@ -232,9 +232,21 @@ class SupabaseRealtimeSignaling implements ISignalingService {
     this.role = role;
     this.displayName = displayName;
 
+    // Secure private Realtime authorization:
+    // Uses Supabase Anonymous Auth so RLS policies on realtime.messages can authorize
+    // only the two verified room participants to subscribe and broadcast.
+    // Fail-closed: In cloud mode, never fall back to unauthenticated public channels.
+    const anonymousUserId = await getOrInitAnonymousSession();
+    if (!anonymousUserId) {
+      throw new Error(
+        'Supabase Anonymous Authentication failed. Private Realtime channels require anonymous sign-ins enabled in the Supabase Dashboard (Authentication -> Providers -> Anonymous). Connection aborted for security.'
+      );
+    }
+
     const channelName = `duowatch_room_${roomCode}`;
     this.channel = supabase.channel(channelName, {
       config: {
+        private: true,
         broadcast: { ack: false, self: false },
         presence: { key: participantId },
       },
@@ -380,6 +392,9 @@ class SupabaseRealtimeSignaling implements ISignalingService {
 export function createSignalingService(): ISignalingService {
   if (isSupabaseConfigured()) {
     return new SupabaseRealtimeSignaling();
+  }
+  if (!isLocalFallbackEnabled()) {
+    throw new Error('Supabase Cloud signaling is required (VITE_ENABLE_LOCAL_FALLBACK=false), but Supabase is not configured.');
   }
   return new LocalBroadcastSignaling();
 }

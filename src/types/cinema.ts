@@ -2,33 +2,69 @@ export type MovieMode = 'youtube' | 'local' | 'screen';
 
 export type ParticipantRole = 'owner' | 'partner';
 
-export type ConnectionStatus = 
-  | 'idle' 
-  | 'connecting' 
-  | 'connected' 
-  | 'reconnecting' 
-  | 'disconnected' 
+export type MediaSyncAction =
+  | 'video_change'
+  | 'play'
+  | 'pause'
+  | 'seek'
+  | 'heartbeat'
+  | 'state_snapshot';
+
+export type ConnectionStatus =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
   | 'failed';
+
+export interface WebRTCStreamStats {
+  timestamp: number;
+  codec?: string;
+  outbound?: {
+    frameWidth: number;
+    frameHeight: number;
+    fps: number;
+    bitrateBps: number;
+    qualityLimitationReason: string;
+    targetBitrateBps?: number;
+  };
+  inbound?: {
+    frameWidth: number;
+    frameHeight: number;
+    fps: number;
+    bitrateBps: number;
+    framesDecoded: number;
+    framesDropped: number;
+    packetsLost: number;
+    jitter: number;
+  };
+  rttMs?: number;
+}
 
 export interface Participant {
   id: string;
   displayName: string;
   role: ParticipantRole;
   isOnline: boolean;
-  isMuted: boolean;
-  isSpeaking: boolean;
+  isMuted?: boolean;
+  isSpeaking?: boolean;
   lastSeen?: number;
 }
 
 export interface MediaState {
   mode: MovieMode;
-  videoId?: string; // YouTube video ID or URL
+  videoId?: string; // YouTube video ID
+  videoUrl?: string; // Canonical YouTube URL
   currentTime: number;
   duration: number;
   isPlaying: boolean;
   playbackRate: number;
   lastUpdatedBy: string; // Participant ID
   clientTimestamp: number; // For drift calculation (Date.now())
+  action?: MediaSyncAction;
+  eventId?: string; // Unique event identifier for deduplication
+  revision: number; // Monotonically increasing revision sequence number
 }
 
 export interface RoomSession {
@@ -38,6 +74,7 @@ export interface RoomSession {
   role: ParticipantRole;
   ownerToken?: string; // Kept in memory/sessionStorage only for owner
   guestPasscode?: string;
+  sessionToken?: string; // Cryptographic per-participant session credential for authenticated RPC calls
   currentMode: MovieMode;
   mediaState: MediaState;
   createdAt: number;
@@ -68,18 +105,28 @@ export interface WebRTCSignalPayload {
   candidate?: RTCIceCandidateInit;
   senderId: string;
   targetId?: string;
-  streamType?: 'voice' | 'media';
+  streamType?: 'video' | 'media';
 }
 
 export interface SyncMessagePayload {
-  type: 
-    | 'media-sync' 
-    | 'chat-message' 
-    | 'emoji-reaction' 
-    | 'participant-state' 
-    | 'ping' 
-    | 'pong';
+  type:
+  | 'media-sync'
+  | 'chat-message'
+  | 'emoji-reaction'
+  | 'participant-state'
+  | 'ping'
+  | 'pong';
+  action?: MediaSyncAction;
   mediaState?: Partial<MediaState>;
+  eventId?: string;
+  revision?: number;
+  senderId?: string;
+  fileMetadata?: {
+    name: string;
+    size: number;
+    type: string;
+    duration?: number;
+  };
   chatMessage?: ChatMessage;
   reaction?: { emoji: string; senderName: string };
   participantState?: { isMuted: boolean; isSpeaking: boolean };
