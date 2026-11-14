@@ -15,6 +15,10 @@
 --   9. Least-privilege EXECUTE permissions: REVOKED from anon, GRANTED to authenticated
 -- ============================================================================
 
+-- 0. Decommission legacy active rooms and participants to guarantee clean constraint creation
+UPDATE public.duowatch_rooms SET is_active = false WHERE is_active = true;
+DELETE FROM public.duowatch_participants;
+
 -- 1. Singleton Global State Table for Concurrency Serialization
 CREATE TABLE IF NOT EXISTS public.duowatch_global_state (
     id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -42,7 +46,7 @@ CREATE POLICY "Deny direct table operations on global state"
 -- Guarantees PostgreSQL will reject any transaction attempting to activate a second room
 DROP INDEX IF EXISTS public.idx_duowatch_single_active_room;
 CREATE UNIQUE INDEX idx_duowatch_single_active_room 
-ON public.duowatch_rooms ((true)) 
+ON public.duowatch_rooms (is_active) 
 WHERE is_active = true;
 
 -- 3. Database Constraint: Exactly at most ONE Host and at most ONE Partner per room
@@ -90,8 +94,8 @@ BEGIN
           AND role = 'owner'
           AND last_seen >= (pg_catalog.now() - INTERVAL '90 seconds');
 
-        -- If Host has abandoned room, terminate room safely to release platform
-        IF v_host_count = 0 THEN
+        -- If Host has abandoned room (and room is older than 30s creation grace period), terminate room safely
+        IF v_host_count = 0 AND v_active_room.created_at < (pg_catalog.now() - INTERVAL '30 seconds') THEN
             UPDATE public.duowatch_rooms SET is_active = false WHERE id = v_active_room.id;
             DELETE FROM public.duowatch_participants WHERE room_id = v_active_room.id;
             UPDATE public.duowatch_global_state SET active_room_id = NULL, updated_at = pg_catalog.now() WHERE id = 1;
@@ -141,10 +145,11 @@ BEGIN
         );
     END IF;
 
-    -- Count active participants in the active room
+    -- Count active participants in the active room (within fresh 90s lease)
     SELECT pg_catalog.count(*) INTO v_participant_count
     FROM public.duowatch_participants
-    WHERE room_id = v_active_room_id;
+    WHERE room_id = v_active_room_id
+      AND last_seen >= (pg_catalog.now() - INTERVAL '90 seconds');
 
     IF v_participant_count <= 1 THEN
         RETURN pg_catalog.jsonb_build_object(
@@ -609,7 +614,10 @@ REVOKE ALL ON FUNCTION public.duowatch_leave_room(VARCHAR, VARCHAR, VARCHAR) FRO
 REVOKE ALL ON FUNCTION public.duowatch_end_room(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION public.duowatch_can_access_channel(TEXT) FROM PUBLIC, anon;
 
-GRANT EXECUTE ON FUNCTION public.duowatch_get_platform_availability() TO authenticated;
+-- Public availability check is granted to anon and authenticated (contains zero sensitive data)
+GRANT EXECUTE ON FUNCTION public.duowatch_get_platform_availability() TO anon, authenticated;
+
+-- All room creation, join, and mutation operations remain strictly authenticated-only
 GRANT EXECUTE ON FUNCTION public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.duowatch_join_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.duowatch_heartbeat(VARCHAR, VARCHAR, VARCHAR) TO authenticated;
