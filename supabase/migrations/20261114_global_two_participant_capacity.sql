@@ -231,16 +231,17 @@ BEGIN
 END;
 $$;
 
--- 6. RPC: Create Global Session with Atomic Host Admission (Strict GLOBAL_ACTIVE_ROOMS <= 1 Invariant)
+-- 6. RPC: Create Global Session with Mandatory Atomic Host Admission (Strict GLOBAL_ACTIVE_ROOMS <= 1 Invariant)
 DROP FUNCTION IF EXISTS public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+DROP FUNCTION IF EXISTS public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
 CREATE OR REPLACE FUNCTION public.duowatch_create_room(
     p_room_code VARCHAR,
     p_room_name VARCHAR,
     p_owner_token_hash VARCHAR,
     p_guest_passcode_hash VARCHAR,
-    p_initial_mode VARCHAR DEFAULT 'youtube',
-    p_host_participant_id VARCHAR DEFAULT NULL,
-    p_host_session_token_hash VARCHAR DEFAULT NULL,
+    p_initial_mode VARCHAR,
+    p_host_participant_id VARCHAR,
+    p_host_session_token_hash VARCHAR,
     p_host_display_name VARCHAR DEFAULT 'Host'
 )
 RETURNS JSONB
@@ -272,14 +273,13 @@ BEGIN
         RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'INVALID_GUEST_PASSCODE_HASH');
     END IF;
 
-    IF p_host_participant_id IS NOT NULL THEN
-        IF pg_catalog.length(p_host_participant_id) < 3 OR pg_catalog.length(p_host_participant_id) > 64 THEN
-            RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'INVALID_HOST_PARTICIPANT_ID');
-        END IF;
+    -- Enforce mandatory Host participant credentials: reject hostless rooms
+    IF p_host_participant_id IS NULL OR pg_catalog.length(p_host_participant_id) < 3 OR pg_catalog.length(p_host_participant_id) > 64 THEN
+        RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'MISSING_OR_INVALID_HOST_PARTICIPANT_ID');
+    END IF;
 
-        IF p_host_session_token_hash IS NULL OR pg_catalog.length(p_host_session_token_hash) != 64 THEN
-            RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'INVALID_HOST_SESSION_TOKEN_HASH');
-        END IF;
+    IF p_host_session_token_hash IS NULL OR pg_catalog.length(p_host_session_token_hash) != 64 THEN
+        RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'MISSING_OR_INVALID_HOST_SESSION_TOKEN_HASH');
     END IF;
 
     IF p_initial_mode IS NOT NULL AND p_initial_mode NOT IN ('youtube', 'local', 'screen') THEN
@@ -323,28 +323,26 @@ BEGIN
     )
     RETURNING * INTO v_room;
 
-    -- 7. Atomically insert Host participant if host credentials are provided
-    IF p_host_participant_id IS NOT NULL AND p_host_session_token_hash IS NOT NULL THEN
-        INSERT INTO public.duowatch_participants (
-            room_id,
-            participant_id,
-            user_id,
-            session_token_hash,
-            display_name,
-            role,
-            last_seen,
-            joined_at
-        ) VALUES (
-            v_room.id,
-            p_host_participant_id,
-            v_creator_uid,
-            p_host_session_token_hash,
-            COALESCE(NULLIF(p_host_display_name, ''), 'Host'),
-            'owner',
-            pg_catalog.now(),
-            pg_catalog.now()
-        );
-    END IF;
+    -- 7. Atomically insert mandatory Host participant (every successful room creation includes exactly one Host)
+    INSERT INTO public.duowatch_participants (
+        room_id,
+        participant_id,
+        user_id,
+        session_token_hash,
+        display_name,
+        role,
+        last_seen,
+        joined_at
+    ) VALUES (
+        v_room.id,
+        p_host_participant_id,
+        v_creator_uid,
+        p_host_session_token_hash,
+        COALESCE(NULLIF(p_host_display_name, ''), 'Host'),
+        'owner',
+        pg_catalog.now(),
+        pg_catalog.now()
+    );
 
     -- 8. Update global state pointer
     UPDATE public.duowatch_global_state 
@@ -721,13 +719,18 @@ END;
 $$;
 
 -- 12. Least-Privilege Execution Permissions
-REVOKE ALL ON FUNCTION public.duowatch_get_platform_availability() FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.duowatch_join_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.duowatch_heartbeat(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.duowatch_leave_room(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.duowatch_end_room(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION public.duowatch_can_access_channel(TEXT) FROM PUBLIC, anon;
+-- Internal reconcile is SECURITY DEFINER: strictly revoke direct invocation from PUBLIC, anon, and authenticated
+REVOKE ALL ON FUNCTION public.duowatch_internal_reconcile() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.duowatch_internal_reconcile() TO postgres, service_role;
+
+-- Revoke default public execution across all RPCs
+REVOKE ALL ON FUNCTION public.duowatch_get_platform_availability() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.duowatch_create_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.duowatch_join_room(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.duowatch_heartbeat(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.duowatch_leave_room(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.duowatch_end_room(VARCHAR, VARCHAR, VARCHAR) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.duowatch_can_access_channel(TEXT) FROM PUBLIC, anon, authenticated;
 
 -- Public availability check is granted to anon and authenticated (contains zero sensitive data)
 GRANT EXECUTE ON FUNCTION public.duowatch_get_platform_availability() TO anon, authenticated;

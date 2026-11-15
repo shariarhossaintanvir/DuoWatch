@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { RoomService } from '../src/lib/roomService';
+import * as supabaseModule from '../src/lib/supabase';
 
 describe('Host Invitation Flow & Passcode Verification', () => {
   beforeEach(() => {
+    // Isolate unit/local test runner from production Supabase database
+    vi.spyOn(supabaseModule, 'isSupabaseConfigured').mockReturnValue(false);
+    vi.spyOn(supabaseModule, 'isLocalFallbackEnabled').mockReturnValue(true);
+
     const storageMock = () => {
       let store: Record<string, string> = {};
       return {
@@ -22,9 +27,13 @@ describe('Host Invitation Flow & Passcode Verification', () => {
     }
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('complete host-to-guest invitation flow with secure passcode display and join validation', async () => {
-    // 1. Host creates room
-    const createRes = await RoomService.createRoom('Midnight Movie', 'Alice', 'youtube');
+    // 1. Host creates room with mandatory host participant ID
+    const createRes = await RoomService.createRoom('Midnight Movie', 'Alice', 'youtube', 'host-alice-123');
     expect(createRes.success).toBe(true);
     expect(createRes.room).toBeDefined();
 

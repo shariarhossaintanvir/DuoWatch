@@ -291,8 +291,11 @@ describe('Real Supabase Cloud Integration & Live Security Verification Suite', (
       payload: { msg: 'hello-from-alice', timestamp: Date.now() },
     });
 
-    // Wait briefly for realtime message dispatch
-    await new Promise((r) => setTimeout(r, 1200));
+    // Wait for realtime message dispatch with polling
+    const startWait = Date.now();
+    while (!messageReceivedByBob && Date.now() - startWait < 4000) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     expect(messageReceivedByBob).toBeDefined();
     expect(messageReceivedByBob?.msg).toBe('hello-from-alice');

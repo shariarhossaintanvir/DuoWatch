@@ -1,11 +1,16 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { RoomService } from '../src/lib/roomService';
+import * as supabaseModule from '../src/lib/supabase';
 import type { MediaState } from '../src/types/cinema';
 
 describe('Adversarial Security & RPC Authorization Suite', () => {
   beforeEach(() => {
+    // Isolate unit/local test runner from production Supabase database
+    vi.spyOn(supabaseModule, 'isSupabaseConfigured').mockReturnValue(false);
+    vi.spyOn(supabaseModule, 'isLocalFallbackEnabled').mockReturnValue(true);
+
     const storageMock = () => {
       let store: Record<string, string> = {};
       return {
@@ -25,9 +30,13 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
     }
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('ATTACK SCENARIO 1: Attacker knowing room code and victim participant ID CANNOT invoke heartbeat without session credential', async () => {
     // 1. Host creates room and joins
-    const createRes = await RoomService.createRoom('Secure Cinema', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Secure Cinema', 'Alice', 'youtube', 'host-alice');
     const room = createRes.room!;
     const hostJoin = await RoomService.joinRoom(room.roomCode, 'host-alice', 'Alice', room.ownerToken!, 'owner');
     expect(hostJoin.success).toBe(true);
@@ -59,7 +68,7 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
   }, 15000);
 
   it('ATTACK SCENARIO 2: Attacker knowing room code and victim participant ID CANNOT kick victim from room', async () => {
-    const createRes = await RoomService.createRoom('Private Cinema', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Private Cinema', 'Alice', 'youtube', 'host-alice');
     const room = createRes.room!;
     await RoomService.joinRoom(room.roomCode, 'host-alice', 'Alice', room.ownerToken!, 'owner');
     const partnerJoin = await RoomService.joinRoom(room.roomCode, 'partner-bob', 'Bob', room.guestPasscode!, 'partner');
@@ -80,7 +89,7 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
   });
 
   it('ATTACK SCENARIO 3: Non-host (Partner or Attacker) CANNOT update media state or impersonate Host', async () => {
-    const createRes = await RoomService.createRoom('Movie Night', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Movie Night', 'Alice', 'youtube', 'host-alice');
     const room = createRes.room!;
     const hostJoin = await RoomService.joinRoom(room.roomCode, 'host-alice', 'Alice', room.ownerToken!, 'owner');
     const partnerJoin = await RoomService.joinRoom(room.roomCode, 'partner-bob', 'Bob', room.guestPasscode!, 'partner');
@@ -125,7 +134,7 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
   });
 
   it('ATTACK SCENARIO 4: Third-participant admission is strictly denied even with valid guest passcode', async () => {
-    const createRes = await RoomService.createRoom('Two Person Cinema', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Two Person Cinema', 'Alice', 'youtube', 'alice-id');
     const room = createRes.room!;
 
     // Admitting Participant 1 (Host)
@@ -149,7 +158,7 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
   });
 
   it('ATTACK SCENARIO 5: Session objects and responses never leak database token hashes', async () => {
-    const createRes = await RoomService.createRoom('Top Secret Room', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Top Secret Room', 'Alice', 'youtube', 'host-alice');
     expect(createRes.success).toBe(true);
     const room = createRes.room!;
 
@@ -171,7 +180,7 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
   });
 
   it('ATTACK SCENARIO 6: Reconnection after browser refresh restores session without consuming extra capacity', async () => {
-    const createRes = await RoomService.createRoom('Cinema', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Cinema', 'Alice', 'youtube', 'alice-id');
     const room = createRes.room!;
     const hostJoin = await RoomService.joinRoom(room.roomCode, 'alice-id', 'Alice', room.ownerToken!, 'owner');
     expect(hostJoin.success).toBe(true);
@@ -206,7 +215,7 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
   });
 
   it('ATTACK SCENARIO 7: Expired room rejects joining and heartbeats', async () => {
-    const createRes = await RoomService.createRoom('Expiring Cinema', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Expiring Cinema', 'Alice', 'youtube', 'alice-id');
     const room = createRes.room!;
     await RoomService.joinRoom(room.roomCode, 'alice-id', 'Alice', room.ownerToken!, 'owner');
 
@@ -241,9 +250,9 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
       if (!userId || !topic) return false;
       return participants.some(
         p => p.userId === userId &&
-             p.isActive &&
-             p.expiresAt > Date.now() &&
-             `duowatch_room_${p.roomCode}` === topic
+          p.isActive &&
+          p.expiresAt > Date.now() &&
+          `duowatch_room_${p.roomCode}` === topic
       );
     };
 
@@ -354,9 +363,9 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
 
       const pIndex = participants.findIndex(
         p => p.room_id === room.id &&
-             p.participant_id === participantId &&
-             p.session_token_hash === sessionTokenHash &&
-             p.user_id === callerUid
+          p.participant_id === participantId &&
+          p.session_token_hash === sessionTokenHash &&
+          p.user_id === callerUid
       );
       if (pIndex === -1) return { success: false, error: 'UNAUTHORIZED_SESSION' };
       participants[pIndex].last_seen = Date.now();
@@ -370,9 +379,9 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
 
       const pIndex = participants.findIndex(
         p => p.room_id === room.id &&
-             p.participant_id === participantId &&
-             p.session_token_hash === sessionTokenHash &&
-             p.user_id === callerUid
+          p.participant_id === participantId &&
+          p.session_token_hash === sessionTokenHash &&
+          p.user_id === callerUid
       );
       if (pIndex === -1) return { success: false, error: 'UNAUTHORIZED_SESSION' };
       participants.splice(pIndex, 1);
@@ -386,10 +395,10 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
 
       const host = participants.find(
         p => p.room_id === room.id &&
-             p.participant_id === participantId &&
-             p.session_token_hash === sessionTokenHash &&
-             p.role === 'owner' &&
-             p.user_id === callerUid
+          p.participant_id === participantId &&
+          p.session_token_hash === sessionTokenHash &&
+          p.role === 'owner' &&
+          p.user_id === callerUid
       );
       if (!host) return { success: false, error: 'UNAUTHORIZED_NOT_HOST' };
       room.current_mode = mode;
@@ -401,7 +410,7 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
       if (!callerUid || !topic) return false;
       return participants.some(
         p => p.user_id === callerUid &&
-             rooms.some(r => r.id === p.room_id && r.is_active && r.expires_at > Date.now() && `duowatch_room_${r.room_code}` === topic)
+          rooms.some(r => r.id === p.room_id && r.is_active && r.expires_at > Date.now() && `duowatch_room_${r.room_code}` === topic)
       );
     };
 
@@ -504,9 +513,9 @@ describe('Adversarial Security & RPC Authorization Suite', () => {
     const heartbeatCheck = (callerUid: string, participantId: string, sessionHash: string) => {
       const match = participants.find(
         p => p.room_id === room.id &&
-             p.participant_id === participantId &&
-             p.session_token_hash === sessionHash &&
-             p.user_id === callerUid
+          p.participant_id === participantId &&
+          p.session_token_hash === sessionHash &&
+          p.user_id === callerUid
       );
       return Boolean(match);
     };

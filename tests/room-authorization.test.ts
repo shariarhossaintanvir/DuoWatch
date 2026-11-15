@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { RoomService } from '../src/lib/roomService';
+import * as supabaseModule from '../src/lib/supabase';
 
 describe('Private Room System & Capacity Enforcement', () => {
   beforeEach(() => {
+    // Isolate unit/local test runner from production Supabase database
+    vi.spyOn(supabaseModule, 'isSupabaseConfigured').mockReturnValue(false);
+    vi.spyOn(supabaseModule, 'isLocalFallbackEnabled').mockReturnValue(true);
+
     // Setup in-memory mock for localStorage and sessionStorage if not present
     const storageMock = () => {
       let store: Record<string, string> = {};
@@ -23,8 +28,12 @@ describe('Private Room System & Capacity Enforcement', () => {
     }
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('should create private room with Owner session and valid credentials', async () => {
-    const res = await RoomService.createRoom('Private Cinema', 'Alice', 'youtube');
+    const res = await RoomService.createRoom('Private Cinema', 'Alice', 'youtube', 'owner-alice');
     expect(res.success).toBe(true);
     expect(res.room).toBeDefined();
 
@@ -33,10 +42,12 @@ describe('Private Room System & Capacity Enforcement', () => {
     expect(room.role).toBe('owner');
     expect(room.ownerToken).toBeDefined();
     expect(room.guestPasscode).toBeDefined();
+    expect(room.participantId).toBe('owner-alice');
+    expect(room.sessionToken).toBeDefined();
   }, 25000);
 
   it('should allow Partner to join with valid guest passcode', async () => {
-    const createRes = await RoomService.createRoom('Date Night', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Date Night', 'Alice', 'youtube', 'owner-alice');
     const room = createRes.room!;
 
     const joinRes = await RoomService.joinRoom(
@@ -53,7 +64,7 @@ describe('Private Room System & Capacity Enforcement', () => {
   });
 
   it('should reject joining with invalid guest passcode', async () => {
-    const createRes = await RoomService.createRoom('Movie Night', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Movie Night', 'Alice', 'youtube', 'owner-alice');
     const room = createRes.room!;
 
     const joinRes = await RoomService.joinRoom(
@@ -69,7 +80,7 @@ describe('Private Room System & Capacity Enforcement', () => {
   });
 
   it('should reject third participant when room capacity of 2 is reached', async () => {
-    const createRes = await RoomService.createRoom('Two Person Cinema', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Two Person Cinema', 'Alice', 'youtube', 'owner-id-alice');
     const room = createRes.room!;
 
     // 1. Participant 1 (Owner) joins
@@ -106,7 +117,7 @@ describe('Private Room System & Capacity Enforcement', () => {
   });
 
   it('should allow existing participant to reconnect without exceeding capacity', async () => {
-    const createRes = await RoomService.createRoom('Two Person Cinema', 'Alice', 'youtube');
+    const createRes = await RoomService.createRoom('Two Person Cinema', 'Alice', 'youtube', 'owner-id-alice');
     const room = createRes.room!;
 
     // Owner joins
