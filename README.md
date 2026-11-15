@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://duowatch.pages.dev">Live Cinema</a> ·
+  <a href="https://duowatch-opal.vercel.app">Live Cinema</a> ·
   <a href="#project-overview">Overview</a> ·
   <a href="#core-features">Features</a> ·
   <a href="#technology-stack">Tech Stack</a> ·
@@ -23,7 +23,7 @@
 ---
 
 > [!NOTE]
-> **Production Status:** The frontend application is deployed and served via Cloudflare Pages from `main`. The Phase 21 database capacity and host validation migration (`supabase/migrations/`) is authored and staged, but awaiting scheduled production database execution. Frontend RPC calls are designed to fail closed with clear maintenance messaging if invoked against an unmigrated backend.
+> **Production Status:** The frontend application is deployed and served via Vercel from `main`. The Phase 21 database capacity and host validation migration (`supabase/migrations/`) is authored and staged, but awaiting scheduled production database execution. Frontend RPC calls are designed to fail closed with clear maintenance messaging if invoked against an unmigrated backend.
 
 ---
 
@@ -35,7 +35,7 @@
 
 * **Strictly Two Participants:** Unlike open conference tools or mass watch parties, DuoWatch enforces a hard platform ceiling of one Host and one Partner per room. Once the two-person capacity is reached, all additional connection attempts are strictly denied.
 * **Direct Peer-to-Peer Streaming:** Local movies and screen-shares stream directly between browsers using WebRTC. Videos are never uploaded, transcoded, or retained on application servers or cloud buckets.
-* **Zero-Cost Serverless Footprint:** By offloading media transmission to browser-native WebRTC and utilizing Cloudflare Pages and Supabase serverless tiers, the platform runs at zero operational infrastructure cost.
+* **Zero-Cost Serverless Footprint:** By offloading media transmission to browser-native WebRTC and utilizing Vercel (Hobby) and Supabase serverless tiers, the platform runs at zero operational infrastructure cost.
 * **Privacy by Default:** Authentication is anonymous and ephemeral. Text chat resides solely in memory during the session and is never persisted to database tables.
 
 ---
@@ -87,7 +87,7 @@ The platform is built using modern web standards and serverless infrastructure:
 | **Signaling** | Supabase Realtime | — | Presence tracking and WebRTC signaling exchange |
 | **Media Transport** | WebRTC | Browser Native | Peer-to-peer video, audio, and data channel transmission |
 | **External Media** | YouTube IFrame API | Standard | Synchronized YouTube player integration |
-| **Hosting** | Cloudflare Pages | Edge | Global edge distribution and SPA static hosting |
+| **Hosting** | Vercel | Global Edge | Global CDN distribution and SPA rewrite hosting |
 | **Test Runner** | Vitest | `5.0.5` | Fast concurrent unit and security test suites |
 | **Code Quality** | Oxlint | `1.89.0` | High-performance JavaScript/TypeScript linter |
 
@@ -97,7 +97,7 @@ The platform is built using modern web standards and serverless infrastructure:
 
 ```text
                            +---------------------------+
-                           |     Cloudflare Pages      |
+                           |          Vercel           |
                            |   (Global Edge Static)    |
                            +-------------+-------------+
                                          |
@@ -131,7 +131,7 @@ The platform is built using modern web standards and serverless infrastructure:
 
 ### Component Responsibilities
 
-* **Cloudflare Pages:** Serves the pre-compiled SPA bundle globally with low latency. Static redirects (`_redirects`) handle direct URL navigation.
+* **Vercel:** Serves the pre-compiled SPA bundle globally with low latency. Edge rewrites (`vercel.json`) handle direct client-side URL navigation without 404 errors.
 * **Host Browser:** Initiates room creation, serves as the WebRTC offerer, captures local media or screen capture streams, and broadcasts playback state changes.
 * **Partner Browser:** Validates credentials with the guest passcode, receives the WebRTC answer, renders the incoming media stream, and syncs playback state.
 * **Supabase Authentication:** Generates isolated, cryptographically distinct anonymous user IDs for both participants without tracking personal data.
@@ -182,7 +182,7 @@ Open `http://localhost:5173` in your browser.
 
 ## Environment Configuration
 
-Configure the required variables in `.env.local` for development or in your Cloudflare Pages dashboard for production:
+Configure the required variables in `.env.local` for development or in your Vercel Project Settings -> Environment Variables for production:
 
 | Variable | Required | Default | Description |
 | :--- | :---: | :---: | :--- |
@@ -198,16 +198,17 @@ Configure the required variables in `.env.local` for development or in your Clou
 
 ## Deployment
 
-### 1. Cloudflare Pages Setup
+### 1. Vercel SPA Setup
 
-1. Connect your GitHub repository to Cloudflare Pages.
+1. Import your GitHub repository (`shariarhossaintanvir/DuoWatch`) into Vercel.
 2. Select the `main` branch as the production branch.
 3. Configure the build parameters:
    * **Framework Preset:** `Vite`
    * **Build Command:** `npm run build`
    * **Build Output Directory:** `dist`
+   * **Install Command:** `npm ci`
    * **Environment Variables:** Set `NODE_VERSION=22`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `VITE_ENABLE_LOCAL_FALLBACK=false`.
-4. Deploy. The included `public/_redirects` file ensures correct client-side SPA routing for deep paths like `/room/:roomCode`.
+4. Deploy. The included `vercel.json` rewrite configuration ensures clean client-side SPA routing for deep paths like `/room/:roomCode`.
 
 ### 2. Supabase Database Configuration
 
@@ -294,11 +295,10 @@ npm run build
 
 ```text
 DuoWatch/
-├── public/                 # Static assets, SVG icons, and Cloudflare SPA _redirects
+├── public/                 # Static assets and SVG icons
 │   ├── favicon.ico
 │   ├── favicon.svg
-│   ├── icons.svg
-│   └── _redirects
+│   └── icons.svg
 ├── src/
 │   ├── components/         # UI components
 │   │   ├── chat/           # Ephemeral text chat interface
@@ -321,6 +321,7 @@ DuoWatch/
 ├── .gitignore              # Git ignore rules for builds, secrets, and caches
 ├── package.json            # Dependencies and npm execution scripts
 ├── tsconfig.json           # TypeScript configuration
+├── vercel.json             # Vercel SPA route rewrite configuration
 └── vite.config.ts          # Vite build configuration and Tailwind integration
 ```
 
