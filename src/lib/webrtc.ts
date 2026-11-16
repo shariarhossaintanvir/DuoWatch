@@ -19,6 +19,7 @@ export class WebRTCManager {
   private config: WebRTCConfig;
   private localParticipantId: string = '';
   private remoteParticipantId: string = '';
+  private isInitiator: boolean = false;
   private iceCandidateQueue: RTCIceCandidateInit[] = [];
   private isNegotiating: boolean = false;
   private pingInterval: number | null = null;
@@ -72,6 +73,7 @@ export class WebRTCManager {
     this.iceCandidateQueue = pendingCandidates;
     this.localParticipantId = localId;
     this.remoteParticipantId = remoteId;
+    this.isInitiator = isInitiator;
     this.iceRestartAttempts = 0;
     this.currentBitrateBps = 5_000_000;
 
@@ -96,7 +98,8 @@ export class WebRTCManager {
     // 1. Cinema video transceiver (local video file or screen share)
     // 2. Cinema media audio transceiver (movie audio or shared tab/system audio)
     try {
-      const videoTransceiver = this.pc.addTransceiver('video', { direction: 'sendrecv' });
+      const mediaDirection: RTCRtpTransceiverDirection = isInitiator ? 'sendrecv' : 'recvonly';
+      const videoTransceiver = this.pc.addTransceiver('video', { direction: mediaDirection });
       this.localVideoSender = videoTransceiver.sender;
 
       // Prioritize modern high-efficiency video codecs (H.264 & VP9) while keeping all supported codecs
@@ -104,14 +107,17 @@ export class WebRTCManager {
         const capabilities = RTCRtpReceiver.getCapabilities('video');
         if (capabilities && capabilities.codecs && typeof videoTransceiver.setCodecPreferences === 'function') {
           const preferredCodecs = [...capabilities.codecs].sort((a, b) => {
-            const score = (mime: string) => {
-              const lower = mime.toLowerCase();
-              if (lower.includes('h264')) return 3;
-              if (lower.includes('vp9')) return 2;
-              if (lower.includes('vp8')) return 1;
+            const score = (codec: any) => {
+              const mime = (codec.mimeType || '').toLowerCase();
+              const fmtp = ((codec as any).sdpFmtpLine || '').toLowerCase();
+              // Prioritize H.264 Constrained Baseline (42e0xx) first for universal Android & Desktop hardware decode
+              if (mime.includes('h264') && (fmtp.includes('42e0') || fmtp.includes('4200'))) return 4;
+              if (mime.includes('h264')) return 3;
+              if (mime.includes('vp9')) return 2;
+              if (mime.includes('vp8')) return 1;
               return 0;
             };
-            return score(b.mimeType) - score(a.mimeType);
+            return score(b) - score(a);
           });
           try {
             videoTransceiver.setCodecPreferences(preferredCodecs);
@@ -121,7 +127,7 @@ export class WebRTCManager {
         }
       }
 
-      const mediaAudioTransceiver = this.pc.addTransceiver('audio', { direction: 'sendrecv' });
+      const mediaAudioTransceiver = this.pc.addTransceiver('audio', { direction: mediaDirection });
       this.localAudioSender = mediaAudioTransceiver.sender;
     } catch (e) {
       console.warn('Could not add pre-allocated media transceivers:', e);
@@ -262,6 +268,11 @@ export class WebRTCManager {
     // Renegotiation handling
     this.pc.onnegotiationneeded = async () => {
       if (this.isNegotiating || !this.pc) return;
+      // Suppress spontaneous negotiation on receive-only peers without local stream tracks
+      if (!this.isInitiator && (!this.currentLocalStream || this.currentLocalStream.getTracks().length === 0)) {
+        console.log('[DuoWatch WebRTC Diagnostics] Suppressing spontaneous onnegotiationneeded on non-initiator receiver.');
+        return;
+      }
       try {
         if (this.pc.signalingState !== 'stable') return;
         this.isNegotiating = true;
@@ -366,13 +377,10 @@ export class WebRTCManager {
     try {
       if (signal.type === 'offer' && signal.sdp) {
         if (pc.signalingState !== 'stable') {
-          await Promise.all([
-            pc.setLocalDescription({ type: 'rollback' } as any),
-            pc.setRemoteDescription(new RTCSessionDescription(signal.sdp)),
-          ]);
-        } else {
-          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+          console.log(`[DuoWatch WebRTC Diagnostics] Performing sequential rollback for incoming offer. Current state: ${pc.signalingState}`);
+          await pc.setLocalDescription({ type: 'rollback' } as any);
         }
+        await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
 
         await this.processQueuedIceCandidates();
 
@@ -496,6 +504,25 @@ export class WebRTCManager {
       try {
         if (!videoTrack.contentHint) {
           videoTrack.contentHint = 'motion';
+        }
+      } catch { }
+    }
+
+    // Ensure active sender transceivers use sendrecv direction when sending local tracks
+    if (this.pc && stream && stream.getTracks().length > 0) {
+      try {
+        const transceivers = this.pc.getTransceivers();
+        if (videoTrack && this.localVideoSender) {
+          const vt = transceivers.find(t => t.sender === this.localVideoSender);
+          if (vt && vt.direction !== 'sendrecv') {
+            vt.direction = 'sendrecv';
+          }
+        }
+        if (audioTrack && this.localAudioSender) {
+          const at = transceivers.find(t => t.sender === this.localAudioSender);
+          if (at && at.direction !== 'sendrecv') {
+            at.direction = 'sendrecv';
+          }
         }
       } catch { }
     }
@@ -721,6 +748,20 @@ export class WebRTCManager {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
     }
+  }
+
+  public getDiagnostics() {
+    return {
+      connectionState: this.pc?.connectionState || 'closed',
+      iceConnectionState: this.pc?.iceConnectionState || 'closed',
+      signalingState: this.pc?.signalingState || 'closed',
+      isInitiator: this.isInitiator,
+      hasLocalVideoTrack: Boolean(this.localVideoSender?.track && this.localVideoSender.track.readyState === 'live'),
+      hasLocalAudioTrack: Boolean(this.localAudioSender?.track && this.localAudioSender.track.readyState === 'live'),
+      hasRemoteVideoTrack: this.remoteMediaStream.getVideoTracks().some(t => t.readyState === 'live'),
+      hasRemoteAudioTrack: this.remoteMediaStream.getAudioTracks().some(t => t.readyState === 'live'),
+      codec: this.negotiatedCodec || undefined,
+    };
   }
 
   public cleanup(): void {

@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { useCinema } from '../../context/CinemaContext';
-import { Upload, Film, AlertTriangle, ShieldCheck, Play, Pause, RotateCcw, Sparkles } from 'lucide-react';
+import { Upload, Film, AlertTriangle, ShieldCheck, Play, Pause, RotateCcw, Sparkles, Volume2 } from 'lucide-react';
+import { WebRTCDiagnosticsPanel } from './WebRTCDiagnosticsPanel';
 
 export const LocalFilePlayer: React.FC = () => {
   const {
@@ -41,14 +42,19 @@ export const LocalFilePlayer: React.FC = () => {
   const [sourceResolution, setSourceResolution] = useState<{ width: number; height: number } | null>(null);
   const [guestResolution, setGuestResolution] = useState<{ width: number; height: number } | null>(null);
 
-  // Phase 22 Partner Playback & Stream Flowing States
+  // Phase 23 Partner Playback & True Frame Presentation States
   const [_isVideoPlaying, setIsVideoPlaying] = useState<boolean>(false);
   const [isPlaybackUnlocked, setIsPlaybackUnlocked] = useState<boolean>(false);
   const [isAutoplayBlocked, setIsAutoplayBlocked] = useState<boolean>(false);
-  const [hasDecodedFrames, setHasDecodedFrames] = useState<boolean>(false);
+  const [presentedViaRvfc, setPresentedViaRvfc] = useState<boolean>(false);
+  const [isMutedByPolicy, setIsMutedByPolicy] = useState<boolean>(false);
   const [isStreamMuted, setIsStreamMuted] = useState<boolean>(false);
   const [isAttemptingPlay, setIsAttemptingPlay] = useState<boolean>(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const playAttemptIdRef = useRef<number>(0);
+
+  // Derived true frame presentation: verified by requestVideoFrameCallback OR inbound decoded frames
+  const hasPresentedFrames = presentedViaRvfc || Boolean(!isOwner && streamStats?.inbound?.framesDecoded && streamStats.inbound.framesDecoded > 0);
 
   // Feature detection for captureStream
   useEffect(() => {
@@ -141,6 +147,53 @@ export const LocalFilePlayer: React.FC = () => {
     }
   }, [isOwner, setLocalMediaStream]);
 
+  // --- Partner True Frame Presentation Detection via requestVideoFrameCallback ---
+  useEffect(() => {
+    const video = guestVideoRef.current;
+    if (!video || isOwner) return;
+
+    let rVfcId: number | null = null;
+    let active = true;
+
+    if ('requestVideoFrameCallback' in HTMLVideoElement.prototype && typeof (video as any).requestVideoFrameCallback === 'function') {
+      const onFrame = () => {
+        if (!active) return;
+        setPresentedViaRvfc(true);
+        rVfcId = (video as any).requestVideoFrameCallback(onFrame);
+      };
+      rVfcId = (video as any).requestVideoFrameCallback(onFrame);
+    } else {
+      // Robust polling fallback for environments without rVFC
+      const interval = window.setInterval(() => {
+        if (!active || !video) return;
+        if (typeof (video as any).getVideoPlaybackQuality === 'function') {
+          const q = (video as any).getVideoPlaybackQuality();
+          if (q && (q.totalVideoFrames > 0 || (q.droppedVideoFrames + q.totalVideoFrames > 0))) {
+            setPresentedViaRvfc(true);
+            return;
+          }
+        }
+        if (video.videoWidth > 0 && video.videoHeight > 0 && !video.paused && video.currentTime > 0) {
+          setPresentedViaRvfc(true);
+        }
+      }, 500);
+
+      return () => {
+        active = false;
+        window.clearInterval(interval);
+      };
+    }
+
+    return () => {
+      active = false;
+      if (rVfcId !== null && typeof (video as any).cancelVideoFrameCallback === 'function') {
+        try {
+          (video as any).cancelVideoFrameCallback(rVfcId);
+        } catch { }
+      }
+    };
+  }, [isOwner, remoteMediaStream, remoteStreamRevision]);
+
   // --- Partner Remote Stream Attachment & Track Event Handling ---
   useEffect(() => {
     if (isOwner || !guestVideoRef.current) return;
@@ -156,9 +209,6 @@ export const LocalFilePlayer: React.FC = () => {
       const onUnmute = () => {
         console.log('[DuoWatch Diagnostics] Partner: Remote video track unmuted (media packets flowing).');
         setIsStreamMuted(false);
-        if (video.videoWidth > 0) {
-          setHasDecodedFrames(true);
-        }
       };
       const onMute = () => {
         console.log('[DuoWatch Diagnostics] Partner: Remote video track muted (buffering/paused).');
@@ -166,7 +216,7 @@ export const LocalFilePlayer: React.FC = () => {
       };
       const onEnded = () => {
         console.log('[DuoWatch Diagnostics] Partner: Remote video track ended.');
-        setHasDecodedFrames(false);
+        setPresentedViaRvfc(false);
         setIsVideoPlaying(false);
       };
 
@@ -175,7 +225,7 @@ export const LocalFilePlayer: React.FC = () => {
       vTrack.addEventListener('ended', onEnded);
 
       // Attempt initial autoplay if not already unlocked
-      if (!isPlaybackUnlocked) {
+      if (!isPlaybackUnlocked && !isAttemptingPlay) {
         video.play().then(() => {
           setIsPlaybackUnlocked(true);
           setIsAutoplayBlocked(false);
@@ -195,9 +245,9 @@ export const LocalFilePlayer: React.FC = () => {
     } else {
       video.srcObject = null;
       setIsVideoPlaying(false);
-      setHasDecodedFrames(false);
+      setPresentedViaRvfc(false);
     }
-  }, [isOwner, remoteMediaStream, remoteStreamRevision, isPlaybackUnlocked]);
+  }, [isOwner, remoteMediaStream, remoteStreamRevision, isPlaybackUnlocked, isAttemptingPlay]);
 
   // Synchronize Host local playback when remote play/pause/seek arrives from Partner
   useEffect(() => {
@@ -232,72 +282,99 @@ export const LocalFilePlayer: React.FC = () => {
     }
   }, [isOwner, mediaState.isPlaying, isPlaybackUnlocked]);
 
-  // Partner playback control with bounded timeout & user gesture unlock (Phase 22 Repair)
+  // Partner playback control with bounded safety timeout & race protection (Phase 23 Repair)
   const handlePartnerPlay = async () => {
     const video = guestVideoRef.current;
     if (!video) return;
 
+    const attemptId = ++playAttemptIdRef.current;
     setPlaybackError(null);
     setIsAttemptingPlay(true);
 
-    // Bounded safety timeout: ensure isAttemptingPlay NEVER remains stuck indefinitely
-    let isTimedOut = false;
-    const timeoutId = window.setTimeout(() => {
-      isTimedOut = true;
-      setIsAttemptingPlay(false);
-      if (!hasDecodedFrames) {
-        console.log('[DuoWatch Diagnostics] Partner playback attempt timed out waiting for frames from host.');
-      }
-    }, 4500);
+    if (remoteMediaStream && video.srcObject !== remoteMediaStream) {
+      video.srcObject = remoteMediaStream;
+    }
+    video.playsInline = true;
+
+    // Race against 4000ms safety timeout to prevent UI deadlock
+    let timeoutId: number | null = null;
+    const timeoutPromise = new Promise<'timeout'>((resolve) => {
+      timeoutId = window.setTimeout(() => resolve('timeout'), 4000);
+    });
 
     try {
-      if (remoteMediaStream && video.srcObject !== remoteMediaStream) {
-        video.srcObject = remoteMediaStream;
-      }
-
-      video.playsInline = true;
       video.volume = playerVolume / 100;
       video.muted = isPlayerMuted;
 
+      let playResult: void | 'timeout';
       try {
-        await video.play();
-        if (!isTimedOut) {
-          setIsPlaybackUnlocked(true);
-          setIsAutoplayBlocked(false);
-          setIsVideoPlaying(true);
-          setPlaybackError(null);
+        const rawPlay = video.play();
+        if (rawPlay && typeof rawPlay.catch === 'function') {
+          rawPlay.catch(() => {});
         }
+        playResult = await Promise.race([rawPlay, timeoutPromise]);
       } catch (err: any) {
         if (err.name === 'NotAllowedError') {
-          // Fallback: Start muted first to satisfy browser gesture requirements
-          console.warn('[DuoWatch Diagnostics] Unmuted playback blocked, trying muted fallback...');
+          console.warn('[DuoWatch Diagnostics] Unmuted playback rejected by policy, playing muted...');
           video.muted = true;
-          await video.play();
-          if (!isTimedOut) {
-            setIsPlaybackUnlocked(true);
-            setIsAutoplayBlocked(false);
-            setPlaybackError(null);
-            // Re-apply unmuted if user didn't mute
-            if (!isPlayerMuted) {
-              video.muted = false;
-              video.volume = playerVolume / 100;
-            }
+          const rawMutedPlay = video.play();
+          if (rawMutedPlay && typeof rawMutedPlay.catch === 'function') {
+            rawMutedPlay.catch(() => {});
+          }
+          playResult = await Promise.race([rawMutedPlay, timeoutPromise]);
+          if (playAttemptIdRef.current === attemptId && playResult !== 'timeout') {
+            setIsMutedByPolicy(true);
           }
         } else {
           throw err;
         }
       }
 
-      // If the room state indicates paused, send play action to Host
+      if (playAttemptIdRef.current !== attemptId) return;
+
+      if (playResult === 'timeout') {
+        console.warn('[DuoWatch Diagnostics] Playback attempt timed out waiting for frames from host.');
+        setIsAttemptingPlay(false);
+        return;
+      }
+
+      setIsPlaybackUnlocked(true);
+      setIsAutoplayBlocked(false);
+      setIsVideoPlaying(true);
+      setPlaybackError(null);
+      setIsAttemptingPlay(false);
+
       if (!mediaState.isPlaying) {
         updateMediaState({ action: 'play', isPlaying: true, currentTime: mediaState.currentTime || 0 });
       }
     } catch (err: any) {
+      if (playAttemptIdRef.current !== attemptId) return;
       console.warn('[DuoWatch Diagnostics] Partner playback attempt error:', err);
-      setPlaybackError(err.message || 'Browser blocked media playback. Click Retry.');
-    } finally {
-      window.clearTimeout(timeoutId);
+      if (err.name === 'NotAllowedError') {
+        setIsAutoplayBlocked(true);
+        setPlaybackError(null);
+      } else {
+        setPlaybackError(err.message || 'Browser blocked media playback. Click Retry.');
+      }
       setIsAttemptingPlay(false);
+    } finally {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    }
+  };
+
+  // Explicit user gesture handler to unmute audio safely without triggering browser media pause
+  const handleUnmuteGesture = () => {
+    const video = guestVideoRef.current;
+    if (!video) return;
+    try {
+      video.muted = false;
+      video.volume = playerVolume / 100;
+      setIsMutedByPolicy(false);
+      console.log('[DuoWatch Diagnostics] Audio unmuted successfully via explicit user gesture.');
+    } catch (err) {
+      console.warn('[DuoWatch Diagnostics] Error unmuting audio:', err);
     }
   };
 
@@ -349,7 +426,6 @@ export const LocalFilePlayer: React.FC = () => {
       const h = guestVideoRef.current.videoHeight || 0;
       if (w > 0 && h > 0) {
         setGuestResolution({ width: w, height: h });
-        setHasDecodedFrames(true);
       }
     }
   };
@@ -394,11 +470,20 @@ export const LocalFilePlayer: React.FC = () => {
 
   const shouldShowOverlay =
     (!isPlaybackUnlocked && isAutoplayBlocked) ||
-    playbackError !== null ||
-    isAttemptingPlay;
+    playbackError !== null;
 
   return (
     <div className="relative w-full h-full flex flex-col items-center justify-center bg-black overflow-hidden select-none">
+      {/* Real-Time WebRTC Diagnostics Panel for Host & Partner */}
+      <WebRTCDiagnosticsPanel
+        hasPresentedFrames={hasPresentedFrames}
+        isPlaybackUnlocked={isPlaybackUnlocked}
+        isAutoplayBlocked={isAutoplayBlocked}
+        isMutedByPolicy={isMutedByPolicy}
+        isAttemptingPlay={isAttemptingPlay}
+        videoRef={isOwner ? hostVideoRef : guestVideoRef}
+      />
+
       {/* OWNER (HOST) VIEW */}
       {isOwner && (
         <div className="w-full h-full flex flex-col items-center justify-center">
@@ -547,16 +632,10 @@ export const LocalFilePlayer: React.FC = () => {
                 onPlay={() => setIsVideoPlaying(true)}
                 onPlaying={() => {
                   setIsVideoPlaying(true);
-                  setHasDecodedFrames(true);
                   setIsPlaybackUnlocked(true);
                   setIsAutoplayBlocked(false);
                   setPlaybackError(null);
                   setIsAttemptingPlay(false);
-                }}
-                onCanPlay={() => {
-                  if (guestVideoRef.current && guestVideoRef.current.videoWidth > 0) {
-                    setHasDecodedFrames(true);
-                  }
                 }}
                 onLoadedMetadata={handleGuestMetadata}
                 onResize={handleGuestMetadata}
@@ -607,7 +686,7 @@ export const LocalFilePlayer: React.FC = () => {
 
               {/* Partner Paused Indicator when Host pauses and stream is unlocked */}
               {!mediaState.isPlaying && isPlaybackUnlocked && !shouldShowOverlay && (
-                <div className="absolute top-4 right-4 z-20 pointer-events-none flex items-center gap-1.5 bg-[#14161d]/85 backdrop-blur-md border border-[#282d3c] px-3 py-1.5 rounded-lg shadow-lg text-[11px] font-mono text-amber-400 animate-in fade-in">
+                <div className="absolute top-4 right-20 z-20 pointer-events-none flex items-center gap-1.5 bg-[#14161d]/85 backdrop-blur-md border border-[#282d3c] px-3 py-1.5 rounded-lg shadow-lg text-[11px] font-mono text-amber-400 animate-in fade-in">
                   <Pause className="w-3.5 h-3.5" />
                   <span>Host Paused Cinema</span>
                 </div>
@@ -621,7 +700,27 @@ export const LocalFilePlayer: React.FC = () => {
                 </div>
               )}
 
-              {/* Partner Playback Overlay */}
+              {/* Non-Blocking Attempting Play Badge */}
+              {isAttemptingPlay && !shouldShowOverlay && (
+                <div className="absolute bottom-4 left-4 z-20 pointer-events-none flex items-center gap-2 bg-[#14161d]/90 backdrop-blur-md border border-amber-500/40 px-3 py-1.5 rounded-lg shadow-lg text-[11px] font-mono text-amber-300 animate-in fade-in">
+                  <Film className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                  <span>Connecting to incoming stream...</span>
+                </div>
+              )}
+
+              {/* Explicit User Gesture Pill: Tap to Unmute Audio */}
+              {isMutedByPolicy && isPlaybackUnlocked && !shouldShowOverlay && (
+                <button
+                  onClick={handleUnmuteGesture}
+                  className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 bg-amber-500 hover:bg-amber-400 text-black font-semibold text-xs px-4 py-2 rounded-full shadow-2xl flex items-center gap-2 cursor-pointer transition-transform hover:scale-105 active:scale-95 animate-bounce"
+                  aria-label="Tap to unmute movie audio"
+                >
+                  <Volume2 className="w-4 h-4" />
+                  <span>Tap to Unmute Audio</span>
+                </button>
+              )}
+
+              {/* Action Overlay: Only for initial user gesture requirement or playback errors */}
               {shouldShowOverlay && (
                 <div className="absolute inset-0 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-30 animate-in fade-in duration-200">
                   <div className="w-16 h-16 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 mb-4 shadow-xl">
@@ -646,53 +745,24 @@ export const LocalFilePlayer: React.FC = () => {
                         Retry Playback
                       </button>
                     </>
-                  ) : isAttemptingPlay ? (
-                    <>
-                      <h4 className="text-sm font-semibold text-gray-100 mb-1">Starting Video Playback...</h4>
-                      <p className="text-xs text-gray-400 mb-4 max-w-xs">
-                        Connecting to incoming P2P video stream and initializing audio.
-                      </p>
-                      <button
-                        onClick={() => {
-                          setIsAttemptingPlay(false);
-                          setPlaybackError('Playback attempt cancelled by user.');
-                        }}
-                        className="text-xs text-gray-400 hover:text-gray-200 underline cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                    </>
-                  ) : !isPlaybackUnlocked && isAutoplayBlocked ? (
+                  ) : (
                     <>
                       <h4 className="text-base font-bold text-gray-100 mb-1">Incoming Movie Stream</h4>
                       <p className="text-xs text-gray-400 mb-5 max-w-xs leading-relaxed">
-                        Host is streaming a video file. Click below to start synchronized Full HD video and audio playback.
+                        Host is streaming a video file. Tap below to start synchronized Full HD video and audio playback.
                       </p>
                       <button
                         onClick={handlePartnerPlay}
-                        className="bg-amber-500 hover:bg-amber-400 text-black font-semibold text-sm px-6 py-3 rounded-lg shadow-lg shadow-amber-500/20 transition-colors flex items-center gap-2 cursor-pointer"
+                        disabled={isAttemptingPlay}
+                        className="bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-black font-semibold text-sm px-6 py-3 rounded-lg shadow-lg shadow-amber-500/20 transition-colors flex items-center gap-2 cursor-pointer"
                       >
                         <Play className="w-4 h-4 fill-current" />
-                        Click to Play Video & Audio
+                        <span>{isAttemptingPlay ? 'Starting Video...' : 'Click to Play Video & Audio'}</span>
                       </button>
                       <div className="flex items-center gap-1.5 text-[11px] text-emerald-400/90 mt-4 font-mono">
                         <ShieldCheck className="w-3.5 h-3.5" />
                         <span>DTLS-SRTP P2P Encrypted Stream</span>
                       </div>
-                    </>
-                  ) : (
-                    <>
-                      <h4 className="text-sm font-semibold text-gray-100 mb-1">Connecting to Stream...</h4>
-                      <p className="text-xs text-gray-400 mb-4 max-w-xs">
-                        Waiting for initial video frames from Host.
-                      </p>
-                      <button
-                        onClick={handlePartnerPlay}
-                        className="bg-amber-500 hover:bg-amber-400 text-black font-semibold text-xs px-5 py-2.5 rounded-lg shadow-lg transition-colors flex items-center gap-2 cursor-pointer"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                        Force Play
-                      </button>
                     </>
                   )}
                 </div>
