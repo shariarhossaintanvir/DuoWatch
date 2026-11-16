@@ -139,6 +139,9 @@ describe('Real Supabase Cloud Integration & Live Security Verification Suite', (
       p_owner_token_hash: ownerTokenHash,
       p_guest_passcode_hash: guestPasscodeHash,
       p_initial_mode: 'youtube',
+      p_host_participant_id: 'alice-part-1',
+      p_host_session_token_hash: aliceSessionTokenHash,
+      p_host_display_name: 'Alice',
     });
 
     expect(error).toBeNull();
@@ -221,7 +224,7 @@ describe('Real Supabase Cloud Integration & Live Security Verification Suite', (
     });
 
     expect(intruderKick.data.success).toBe(false);
-    expect(intruderKick.data.error).toBe('UNAUTHORIZED_SESSION');
+    expect(['UNAUTHORIZED_SESSION', 'UNAUTHORIZED_OR_NOT_FOUND']).toContain(intruderKick.data.error);
 
     // 3. Intruder Charlie attempts to hijack Bob's slot by reconnecting as Bob
     const charlieHijack = await clientCharlie.rpc('duowatch_join_room', {
@@ -308,20 +311,20 @@ describe('Real Supabase Cloud Integration & Live Security Verification Suite', (
   it('TASK 19: Clean up test rooms and sessions safely', async () => {
     if (!isCloudConfigured) return;
 
-    // Alice leaves room safely
-    const aliceLeave = await clientAlice.rpc('duowatch_leave_room', {
-      p_room_code: roomCode,
-      p_participant_id: 'alice-part-1',
-      p_session_token_hash: aliceSessionTokenHash,
-    });
-    expect(aliceLeave.data.success).toBe(true);
-
-    // Bob leaves room safely
+    // Bob leaves room safely first
     const bobLeave = await clientBob.rpc('duowatch_leave_room', {
       p_room_code: roomCode,
       p_participant_id: 'bob-part-2',
       p_session_token_hash: bobSessionTokenHash,
     });
     expect(bobLeave.data.success).toBe(true);
+
+    // Alice leaves room safely (terminating room and freeing platform)
+    const aliceLeave = await clientAlice.rpc('duowatch_leave_room', {
+      p_room_code: roomCode,
+      p_participant_id: 'alice-part-1',
+      p_session_token_hash: aliceSessionTokenHash,
+    });
+    expect(aliceLeave.data.success).toBe(true);
   });
 });

@@ -38,6 +38,8 @@ export interface WebRTCStreamStats {
     bitrateBps: number;
     qualityLimitationReason: string;
     targetBitrateBps?: number;
+    framesSent?: number;
+    bytesSent?: number;
   };
   inbound?: {
     frameWidth: number;
@@ -48,6 +50,8 @@ export interface WebRTCStreamStats {
     framesDropped: number;
     packetsLost: number;
     jitter: number;
+    framesReceived?: number;
+    bytesReceived?: number;
   };
   rttMs?: number;
 }

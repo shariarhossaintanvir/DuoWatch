@@ -7,6 +7,7 @@ export interface WebRTCConfig {
   onDataChannelClose: () => void;
   onDataMessage: (data: SyncMessagePayload) => void;
   onRemoteMediaStream: (stream: MediaStream) => void;
+  onTrackStateChange?: (track: MediaStreamTrack, event: 'unmute' | 'mute' | 'ended') => void;
   onSendSignal: (signal: WebRTCSignalPayload) => void;
   onRttUpdate?: (rttMs: number) => void;
   onStreamStats?: (stats: WebRTCStreamStats) => void;
@@ -28,6 +29,8 @@ export class WebRTCManager {
   // Track senders: Exactly 2 clean transceivers (Cinema Video & Cinema Media Audio)
   private localVideoSender: RTCRtpSender | null = null;
   private localAudioSender: RTCRtpSender | null = null;
+  private currentLocalStream: MediaStream | null = null;
+  private boundLocalTrackListeners: { stream: MediaStream; onAdd: any; onRemove: any } | null = null;
 
   // Remote media stream (Cinema video / screen share + optional system audio)
   private remoteMediaStream: MediaStream = new MediaStream();
@@ -128,6 +131,7 @@ export class WebRTCManager {
     this.pc.onconnectionstatechange = () => {
       if (!this.pc) return;
       const state = this.pc.connectionState;
+      console.log(`[DuoWatch WebRTC Diagnostics] PeerConnection state: ${state}`);
       switch (state) {
         case 'connected':
           this.iceRestartAttempts = 0;
@@ -158,6 +162,7 @@ export class WebRTCManager {
     this.pc.oniceconnectionstatechange = () => {
       if (!this.pc) return;
       const state = this.pc.iceConnectionState;
+      console.log(`[DuoWatch WebRTC Diagnostics] ICE connection state: ${state}`);
       if (state === 'failed') {
         if (this.iceRestartAttempts < this.maxIceRestarts) {
           this.iceRestartAttempts++;
@@ -191,6 +196,7 @@ export class WebRTCManager {
     // Handling remote tracks: maintain a stable remoteMediaStream instance to avoid interrupting HTMLMediaElement playback
     this.pc.ontrack = (event) => {
       const track = event.track;
+      console.log(`[DuoWatch WebRTC Diagnostics] ontrack: kind=${track.kind}, id=${track.id}, muted=${track.muted}, readyState=${track.readyState}`);
 
       if (track.kind === 'video') {
         const existingVideos = this.remoteMediaStream.getVideoTracks();
@@ -204,12 +210,22 @@ export class WebRTCManager {
         this.config.onRemoteMediaStream(this.remoteMediaStream);
 
         track.onunmute = () => {
+          console.log(`[DuoWatch WebRTC Diagnostics] Remote video track unmuted (media packets flowing): id=${track.id}`);
           this.config.onRemoteMediaStream(this.remoteMediaStream);
+          this.config.onTrackStateChange?.(track, 'unmute');
+        };
+
+        track.onmute = () => {
+          console.log(`[DuoWatch WebRTC Diagnostics] Remote video track muted (media paused/buffering): id=${track.id}`);
+          this.config.onRemoteMediaStream(this.remoteMediaStream);
+          this.config.onTrackStateChange?.(track, 'mute');
         };
 
         track.onended = () => {
+          console.log(`[DuoWatch WebRTC Diagnostics] Remote video track ended: id=${track.id}`);
           try { this.remoteMediaStream.removeTrack(track); } catch { }
           this.config.onRemoteMediaStream(this.remoteMediaStream);
+          this.config.onTrackStateChange?.(track, 'ended');
         };
       } else if (track.kind === 'audio') {
         const existingAudios = this.remoteMediaStream.getAudioTracks();
@@ -223,12 +239,22 @@ export class WebRTCManager {
         this.config.onRemoteMediaStream(this.remoteMediaStream);
 
         track.onunmute = () => {
+          console.log(`[DuoWatch WebRTC Diagnostics] Remote audio track unmuted (audio flowing): id=${track.id}`);
           this.config.onRemoteMediaStream(this.remoteMediaStream);
+          this.config.onTrackStateChange?.(track, 'unmute');
+        };
+
+        track.onmute = () => {
+          console.log(`[DuoWatch WebRTC Diagnostics] Remote audio track muted: id=${track.id}`);
+          this.config.onRemoteMediaStream(this.remoteMediaStream);
+          this.config.onTrackStateChange?.(track, 'mute');
         };
 
         track.onended = () => {
+          console.log(`[DuoWatch WebRTC Diagnostics] Remote audio track ended: id=${track.id}`);
           try { this.remoteMediaStream.removeTrack(track); } catch { }
           this.config.onRemoteMediaStream(this.remoteMediaStream);
+          this.config.onTrackStateChange?.(track, 'ended');
         };
       }
     };
@@ -450,8 +476,20 @@ export class WebRTCManager {
   public setMediaStream(stream: MediaStream | null): void {
     if (!this.pc) return;
 
+    // Clean up listeners from previously registered local stream
+    if (this.boundLocalTrackListeners) {
+      try {
+        this.boundLocalTrackListeners.stream.removeEventListener('addtrack', this.boundLocalTrackListeners.onAdd);
+        this.boundLocalTrackListeners.stream.removeEventListener('removetrack', this.boundLocalTrackListeners.onRemove);
+      } catch { }
+      this.boundLocalTrackListeners = null;
+    }
+    this.currentLocalStream = stream;
+
     const videoTrack = stream ? (stream.getVideoTracks()[0] || null) : null;
     const audioTrack = stream ? (stream.getAudioTracks()[0] || null) : null;
+
+    console.log(`[DuoWatch WebRTC Diagnostics] setMediaStream: videoTrack=${videoTrack?.id || 'none'} (${videoTrack?.readyState || 'none'}), audioTrack=${audioTrack?.id || 'none'} (${audioTrack?.readyState || 'none'})`);
 
     if (videoTrack) {
       // Set content hint if supported
@@ -492,6 +530,43 @@ export class WebRTCManager {
         console.warn('Could not add media audio track:', e);
       }
     }
+
+    // 3. Listen for tracks added dynamically (e.g. audio demuxing completes after metadata)
+    if (stream) {
+      const onAdd = (ev: MediaStreamTrackEvent) => {
+        if (!ev.track) return;
+        console.log(`[DuoWatch WebRTC Diagnostics] Dynamic track added to local stream: kind=${ev.track.kind}, id=${ev.track.id}`);
+        if (ev.track.kind === 'video' && this.localVideoSender) {
+          this.localVideoSender.replaceTrack(ev.track).then(() => {
+            this.applyHighQualityVideoParameters(this.currentBitrateBps);
+          }).catch(() => { });
+        } else if (ev.track.kind === 'audio' && this.localAudioSender) {
+          this.localAudioSender.replaceTrack(ev.track).catch(() => { });
+        }
+      };
+
+      const onRemove = (ev: MediaStreamTrackEvent) => {
+        if (!ev.track) return;
+        console.log(`[DuoWatch WebRTC Diagnostics] Track removed from local stream: kind=${ev.track.kind}, id=${ev.track.id}`);
+        if (ev.track.kind === 'video' && this.localVideoSender) {
+          const remainingVideo = stream.getVideoTracks()[0] || null;
+          this.localVideoSender.replaceTrack(remainingVideo).catch(() => { });
+        } else if (ev.track.kind === 'audio' && this.localAudioSender) {
+          const remainingAudio = stream.getAudioTracks()[0] || null;
+          this.localAudioSender.replaceTrack(remainingAudio).catch(() => { });
+        }
+      };
+
+      try {
+        stream.addEventListener('addtrack', onAdd);
+        stream.addEventListener('removetrack', onRemove);
+        this.boundLocalTrackListeners = { stream, onAdd, onRemove };
+      } catch { }
+    }
+  }
+
+  public getLocalStream(): MediaStream | null {
+    return this.currentLocalStream;
   }
 
   // --- Real-Time Stream Telemetry & Adaptive Bitrate Controller ---
@@ -539,6 +614,8 @@ export class WebRTCManager {
             frameHeight: report.frameHeight || 0,
             fps: Math.round(report.framesPerSecond || 0),
             bitrateBps,
+            framesSent: report.framesSent || 0,
+            bytesSent: report.bytesSent || 0,
             qualityLimitationReason: report.qualityLimitationReason || 'none',
             targetBitrateBps: this.currentBitrateBps,
           };
@@ -558,9 +635,11 @@ export class WebRTCManager {
             frameHeight: report.frameHeight || 0,
             fps: Math.round(report.framesPerSecond || 0),
             bitrateBps,
+            framesReceived: report.framesReceived || 0,
             framesDecoded: report.framesDecoded || 0,
             framesDropped: report.framesDropped || 0,
             packetsLost: report.packetsLost || 0,
+            bytesReceived: report.bytesReceived || 0,
             jitter: Math.round((report.jitter || 0) * 1000),
           };
         } else if (report.type === 'remote-inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) {
@@ -647,6 +726,14 @@ export class WebRTCManager {
   public cleanup(): void {
     this.stopRttPing();
     this.stopStatsMonitoring();
+    if (this.boundLocalTrackListeners) {
+      try {
+        this.boundLocalTrackListeners.stream.removeEventListener('addtrack', this.boundLocalTrackListeners.onAdd);
+        this.boundLocalTrackListeners.stream.removeEventListener('removetrack', this.boundLocalTrackListeners.onRemove);
+      } catch { }
+      this.boundLocalTrackListeners = null;
+    }
+    this.currentLocalStream = null;
     if (this.dataChannel) {
       try {
         this.dataChannel.close();

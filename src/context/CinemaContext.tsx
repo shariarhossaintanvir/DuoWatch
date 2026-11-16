@@ -28,6 +28,7 @@ interface CinemaContextValue {
   reactions: FloatingReaction[];
   mediaState: MediaState;
   remoteMediaStream: MediaStream | null;
+  remoteStreamRevision: number;
   localMediaStream: MediaStream | null;
   streamStats: WebRTCStreamStats | null;
   cinemaLights: boolean;
@@ -137,6 +138,7 @@ export const CinemaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // WebRTC Media Streams (Local File Video, Screen Share Video & Audio)
   const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
+  const [remoteStreamRevision, setRemoteStreamRevision] = useState<number>(0);
   const [localMediaStream, setLocalMediaStreamState] = useState<MediaStream | null>(null);
   const localMediaStreamRef = useRef<MediaStream | null>(null);
 
@@ -340,6 +342,7 @@ export const CinemaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       onDataMessage: handleDataMessage,
       onRemoteMediaStream: (stream) => {
         setRemoteMediaStream(stream);
+        setRemoteStreamRevision(r => r + 1);
       },
       onSendSignal: (signal) => {
         signaling.sendSignal(signal);
@@ -399,14 +402,13 @@ export const CinemaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       // Owner initiates the WebRTC offer when Partner connects
       if (sessionRef.current?.role === 'owner') {
         webrtc.initialize(myParticipantId, peer.id, true);
+        // Pre-attach any active local media stream before creating offer to prevent empty-transceiver race
+        if (localMediaStreamRef.current) {
+          webrtc.setMediaStream(localMediaStreamRef.current);
+        }
         webrtc.startAsInitiator();
       } else {
         webrtc.initialize(myParticipantId, peer.id, false);
-      }
-
-      // Automatically pipe active local media stream to WebRTC if host already selected video/screen
-      if (localMediaStreamRef.current) {
-        webrtc.setMediaStream(localMediaStreamRef.current);
       }
     });
 
@@ -743,6 +745,7 @@ export const CinemaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         reactions,
         mediaState,
         remoteMediaStream,
+        remoteStreamRevision,
         localMediaStream,
         streamStats,
         cinemaLights,
